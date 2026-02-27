@@ -8,6 +8,7 @@ from .governance import AsyncGovernanceClient, GovernanceClient
 from .grid_context import AsyncGridContext, GridContext
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
 from .lifecycle import LifecycleCallback, LifecycleContext, LifecyclePhase
+from .service_server import ServiceServer
 from .models import (
     AuditEntry,
     CellConfigAllResponse,
@@ -49,6 +50,8 @@ __all__ = [
     # Grid context
     "GridContext",
     "AsyncGridContext",
+    # Service server
+    "ServiceServer",
     # Models
     "CellMember",
     "CellMembershipMetadata",

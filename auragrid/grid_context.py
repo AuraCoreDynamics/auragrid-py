@@ -4,6 +4,10 @@
 entry points for Python MAS applications that need to interact with
 cell services (configuration, membership, governance).
 
+When ``@auragrid_service`` decorated classes are provided, the context
+automatically starts an embedded service server and registers its port
+with the ProxyWorker.
+
 Environment variables
 ---------------------
 ``AURAGRID_IPC_PORT``
@@ -20,6 +24,7 @@ Environment variables
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Optional
 
@@ -27,6 +32,9 @@ from .cell_config import AsyncCellConfiguration, CellConfiguration
 from .cell_membership import AsyncCellMembership, CellMembership
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
+from .service_server import ServiceServer
+
+logger = logging.getLogger("auragrid.grid_context")
 
 
 class GridContext:
@@ -34,6 +42,10 @@ class GridContext:
 
     Provides lazy-initialized sub-clients for configuration, membership,
     and governance, all sharing a single ``IpcClient`` connection.
+
+    If ``service_instances`` are provided (objects of ``@auragrid_service``
+    decorated classes), an embedded service server is started automatically
+    and the port is registered with the ProxyWorker.
 
     Usage::
 
@@ -43,12 +55,20 @@ class GridContext:
             decision = ctx.governance.can_deploy("my-app", "admin")
     """
 
-    def __init__(self, options: Optional[IpcOptions] = None) -> None:
+    def __init__(
+        self,
+        options: Optional[IpcOptions] = None,
+        service_instances: Optional[list[object]] = None,
+    ) -> None:
         self._options = options or IpcOptions()
         self._ipc_client = IpcClient(self._options)
         self._config: Optional[CellConfiguration] = None
         self._membership: Optional[CellMembership] = None
         self._governance: Optional[GovernanceClient] = None
+        self._service_servers: list[ServiceServer] = []
+
+        if service_instances:
+            self._start_service_servers(service_instances)
 
     def __enter__(self) -> GridContext:
         return self
@@ -57,7 +77,10 @@ class GridContext:
         self.close()
 
     def close(self) -> None:
-        """Close the underlying IPC client."""
+        """Close the underlying IPC client and stop service servers."""
+        for server in self._service_servers:
+            server.stop()
+        self._service_servers.clear()
         self._ipc_client.close()
 
     # ----- sub-clients (lazy) -----
@@ -113,12 +136,51 @@ class GridContext:
         except (IpcError, Exception):
             return False
 
+    # ----- service server -----
+
+    def _start_service_servers(self, instances: list[object]) -> None:
+        """Start embedded service servers for each service instance."""
+        for instance in instances:
+            if not hasattr(instance.__class__, "_auragrid_service_meta"):
+                continue
+
+            server = ServiceServer(instance, self._options.token)
+            server.start()
+            self._service_servers.append(server)
+
+            # Report port to ProxyWorker
+            try:
+                self._ipc_client.post(
+                    "/cell/service-port",
+                    json={
+                        "port": server.port,
+                        "serviceName": server.service_name,
+                        "ipcToken": self._options.token,
+                        "methods": server.method_names,
+                    },
+                )
+                logger.info(
+                    "Registered service '%s' on port %d with ProxyWorker",
+                    server.service_name,
+                    server.port,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to register service '%s' port with ProxyWorker: %s",
+                    server.service_name,
+                    e,
+                )
+
 
 class AsyncGridContext:
     """Asynchronous high-level context for accessing AuraGrid cell services.
 
     Provides lazy-initialized sub-clients for configuration, membership,
     and governance, all sharing a single ``AsyncIpcClient`` connection.
+
+    If ``service_instances`` are provided (objects of ``@auragrid_service``
+    decorated classes), an embedded service server is started automatically
+    and the port is registered with the ProxyWorker.
 
     Usage::
 
@@ -128,21 +190,33 @@ class AsyncGridContext:
             decision = await ctx.governance.can_deploy("my-app", "admin")
     """
 
-    def __init__(self, options: Optional[IpcOptions] = None) -> None:
+    def __init__(
+        self,
+        options: Optional[IpcOptions] = None,
+        service_instances: Optional[list[object]] = None,
+    ) -> None:
         self._options = options or IpcOptions()
         self._ipc_client = AsyncIpcClient(self._options)
         self._config: Optional[AsyncCellConfiguration] = None
         self._membership: Optional[AsyncCellMembership] = None
         self._governance: Optional[AsyncGovernanceClient] = None
+        self._service_servers: list[ServiceServer] = []
+        self._pending_instances = service_instances
 
     async def __aenter__(self) -> AsyncGridContext:
+        if self._pending_instances:
+            await self._start_service_servers(self._pending_instances)
+            self._pending_instances = None
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
         await self.close()
 
     async def close(self) -> None:
-        """Close the underlying async IPC client."""
+        """Close the underlying async IPC client and stop service servers."""
+        for server in self._service_servers:
+            server.stop()
+        self._service_servers.clear()
         await self._ipc_client.close()
 
     # ----- sub-clients (lazy) -----
@@ -193,3 +267,38 @@ class AsyncGridContext:
             ``True`` if the underlying client is not closed, ``False`` otherwise.
         """
         return not self._ipc_client._client.is_closed
+
+    # ----- service server -----
+
+    async def _start_service_servers(self, instances: list[object]) -> None:
+        """Start embedded service servers for each service instance."""
+        for instance in instances:
+            if not hasattr(instance.__class__, "_auragrid_service_meta"):
+                continue
+
+            server = ServiceServer(instance, self._options.token)
+            server.start()
+            self._service_servers.append(server)
+
+            # Report port to ProxyWorker
+            try:
+                await self._ipc_client.post(
+                    "/cell/service-port",
+                    json={
+                        "port": server.port,
+                        "serviceName": server.service_name,
+                        "ipcToken": self._options.token,
+                        "methods": server.method_names,
+                    },
+                )
+                logger.info(
+                    "Registered service '%s' on port %d with ProxyWorker",
+                    server.service_name,
+                    server.port,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to register service '%s' port with ProxyWorker: %s",
+                    server.service_name,
+                    e,
+                )
