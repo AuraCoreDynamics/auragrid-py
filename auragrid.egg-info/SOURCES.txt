@@ -6,6 +6,8 @@ auragrid/cell_membership.py
 auragrid/cli.py
 auragrid/decorators.py
 auragrid/descriptor.py
+auragrid/event_client.py
+auragrid/event_models.py
 auragrid/governance.py
 auragrid/grid_context.py
 auragrid/ipc.py
@@ -21,6 +23,7 @@ auragrid.egg-info/requires.txt
 auragrid.egg-info/top_level.txt
 tests/test_cell_config.py
 tests/test_cell_membership.py
+tests/test_event_client.py
 tests/test_governance.py
 tests/test_grid_context.py
 tests/test_ipc.py

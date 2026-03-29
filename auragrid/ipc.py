@@ -50,6 +50,7 @@ class IpcOptions:
 
     port: int = field(default_factory=lambda: int(os.environ.get("AURAGRID_IPC_PORT", "5100")))
     token: str = field(default_factory=lambda: os.environ.get("AURAGRID_IPC_TOKEN", ""))
+    fencing_token: str | None = field(default_factory=lambda: os.environ.get("AURAGRID_FENCING_TOKEN"))
     timeout: float = 5.0
     max_retries: int = 2
     backoff_factor: float = 0.5
@@ -60,11 +61,17 @@ class IpcOptions:
         return f"http://localhost:{self.port}"
 
 
-def _build_headers(token: str) -> dict[str, str]:
-    """Build common request headers including the IPC authentication token."""
+def _build_headers(token: str, fencing_token: str | None = None) -> dict[str, str]:
+    """Build common request headers including the IPC authentication token.
+
+    If a fencing token is provided, it is included as ``X-AuraGrid-Fencing-Token``
+    for split-brain protection.
+    """
     headers: dict[str, str] = {"Accept": "application/json"}
     if token:
         headers["X-AuraGrid-IPC-Token"] = token
+    if fencing_token:
+        headers["X-AuraGrid-Fencing-Token"] = fencing_token
     return headers
 
 
@@ -97,7 +104,7 @@ class IpcClient:
         self._options = options or IpcOptions()
         self._client = httpx.Client(
             base_url=self._options.base_url,
-            headers=_build_headers(self._options.token),
+            headers=_build_headers(self._options.token, self._options.fencing_token),
             timeout=self._options.timeout,
         )
 
@@ -167,7 +174,7 @@ class AsyncIpcClient:
         self._options = options or IpcOptions()
         self._client = httpx.AsyncClient(
             base_url=self._options.base_url,
-            headers=_build_headers(self._options.token),
+            headers=_build_headers(self._options.token, self._options.fencing_token),
             timeout=self._options.timeout,
         )
 

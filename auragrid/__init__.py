@@ -4,6 +4,8 @@ from .cell_config import AsyncCellConfiguration, CellConfiguration
 from .cell_membership import AsyncCellMembership, CellMembership
 from .decorators import auragrid_method, auragrid_service
 from .descriptor import generate_descriptor, save_descriptor
+from .event_client import AsyncEventClient, EventClient
+from .event_models import AuraEventDto, ConsumeResponse, PublishRequest, WalMarkerDto
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .grid_context import AsyncGridContext, GridContext
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
@@ -47,6 +49,13 @@ __all__ = [
     # Governance
     "GovernanceClient",
     "AsyncGovernanceClient",
+    # Eventing
+    "EventClient",
+    "AsyncEventClient",
+    "AuraEventDto",
+    "PublishRequest",
+    "ConsumeResponse",
+    "WalMarkerDto",
     # Grid context
     "GridContext",
     "AsyncGridContext",

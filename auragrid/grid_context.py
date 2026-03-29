@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 from .cell_config import AsyncCellConfiguration, CellConfiguration
 from .cell_membership import AsyncCellMembership, CellMembership
+from .event_client import AsyncEventClient, EventClient
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
 from .service_server import ServiceServer
@@ -65,6 +66,7 @@ class GridContext:
         self._config: Optional[CellConfiguration] = None
         self._membership: Optional[CellMembership] = None
         self._governance: Optional[GovernanceClient] = None
+        self._events: Optional[EventClient] = None
         self._service_servers: list[ServiceServer] = []
 
         if service_instances:
@@ -105,6 +107,13 @@ class GridContext:
         if self._governance is None:
             self._governance = GovernanceClient(self._ipc_client)
         return self._governance
+
+    @property
+    def events(self) -> EventClient:
+        """Event pub/sub client."""
+        if self._events is None:
+            self._events = EventClient(self._ipc_client)
+        return self._events
 
     # ----- grid identity -----
 
@@ -200,6 +209,7 @@ class AsyncGridContext:
         self._config: Optional[AsyncCellConfiguration] = None
         self._membership: Optional[AsyncCellMembership] = None
         self._governance: Optional[AsyncGovernanceClient] = None
+        self._events: Optional[AsyncEventClient] = None
         self._service_servers: list[ServiceServer] = []
         self._pending_instances = service_instances
 
@@ -241,6 +251,13 @@ class AsyncGridContext:
         if self._governance is None:
             self._governance = AsyncGovernanceClient(self._ipc_client)
         return self._governance
+
+    @property
+    def events(self) -> AsyncEventClient:
+        """Event pub/sub client (async)."""
+        if self._events is None:
+            self._events = AsyncEventClient(self._ipc_client)
+        return self._events
 
     # ----- grid identity -----
 
