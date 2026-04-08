@@ -11,7 +11,14 @@ from .grid_context import AsyncGridContext, GridContext
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
 from .lifecycle import LifecycleCallback, LifecycleContext, LifecyclePhase
 from .service_server import ServiceServer
-from .layer0 import Layer0Client, WasmSigner
+from .layer0 import (
+    Layer0Client,
+    SignatureBlock,
+    WasmManifest,
+    WasmPayload,
+    WasmResult,
+    WasmSigner,
+)
 from .models import (
     AuditEntry,
     CellConfigAllResponse,
@@ -23,9 +30,6 @@ from .models import (
     GovernanceDecision,
     IpcErrorResponse,
     UserRolesResponse,
-    WasmManifest,
-    WasmPayload,
-    WasmResult,
 )
 
 __all__ = [
@@ -71,6 +75,7 @@ __all__ = [
     "WasmManifest",
     "WasmPayload",
     "WasmResult",
+    "SignatureBlock",
     # Models
     "CellMember",
     "CellMembershipMetadata",
