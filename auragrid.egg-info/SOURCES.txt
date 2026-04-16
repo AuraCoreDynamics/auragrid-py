@@ -21,6 +21,10 @@ auragrid.egg-info/dependency_links.txt
 auragrid.egg-info/entry_points.txt
 auragrid.egg-info/requires.txt
 auragrid.egg-info/top_level.txt
+auragrid/layer0/__init__.py
+auragrid/layer0/client.py
+auragrid/layer0/models.py
+auragrid/layer0/signer.py
 tests/test_cell_config.py
 tests/test_cell_membership.py
 tests/test_event_client.py
