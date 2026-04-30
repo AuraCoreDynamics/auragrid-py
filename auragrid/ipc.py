@@ -17,11 +17,70 @@ Environment variables
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import httpx
+
+# ---------------------------------------------------------------------------
+# Stdin-based IPC token loading
+# ---------------------------------------------------------------------------
+_stdin_tokens: Dict[str, str] = {}
+_stdin_tokens_loaded: bool = False
+
+
+def _load_tokens_from_stdin() -> None:
+    """Read IPC_TOKEN and FENCING_TOKEN from stdin if launched by the Grid.
+
+    The Grid host writes exactly::
+
+        IPC_TOKEN={token}
+        FENCING_TOKEN={fencingToken}
+        ---
+
+    This function reads up to 3 lines, parses key=value pairs, and stops
+    at the ``---`` delimiter.  Must be called before any user code can read
+    stdin.
+    """
+    global _stdin_tokens_loaded
+    if _stdin_tokens_loaded:
+        return
+    _stdin_tokens_loaded = True
+
+    # Only read stdin when the Grid host has explicitly enabled the stdin IPC
+    # protocol.  AURAGRID_IPC_STDIN_ENABLED is set exclusively by
+    # ProcessMasLoader and is distinct from AURAGRID_MAS_ID, which operators
+    # may set in dev environments — using MAS_ID would block manual test runs
+    # on stdin.
+    if not os.environ.get("AURAGRID_IPC_STDIN_ENABLED"):
+        return
+    if os.environ.get("AURAGRID_IPC_TOKEN"):
+        # Legacy env var path — use it directly (backward compat during transition)
+        _stdin_tokens["IPC_TOKEN"] = os.environ["AURAGRID_IPC_TOKEN"]
+        if os.environ.get("AURAGRID_FENCING_TOKEN"):
+            _stdin_tokens["FENCING_TOKEN"] = os.environ["AURAGRID_FENCING_TOKEN"]
+        return
+
+    # Read stdin token protocol
+    if sys.stdin is None or sys.stdin.closed:
+        return
+
+    try:
+        for _ in range(3):
+            line = sys.stdin.readline()
+            if not line or line.strip() == "---":
+                break
+            key, _, value = line.strip().partition("=")
+            if key and value:
+                _stdin_tokens[key] = value
+    except (OSError, ValueError):
+        pass  # Non-interactive stdin or read error — tokens stay empty
+
+
+# Execute at import time — before any user code can drain stdin
+_load_tokens_from_stdin()
 
 
 class IpcError(Exception):
@@ -49,8 +108,8 @@ class IpcOptions:
     """
 
     port: int = field(default_factory=lambda: int(os.environ.get("AURAGRID_IPC_PORT", "5100")))
-    token: str = field(default_factory=lambda: os.environ.get("AURAGRID_IPC_TOKEN", ""))
-    fencing_token: str | None = field(default_factory=lambda: os.environ.get("AURAGRID_FENCING_TOKEN"))
+    token: str = field(default_factory=lambda: _stdin_tokens.get("IPC_TOKEN", ""))
+    fencing_token: str | None = field(default_factory=lambda: _stdin_tokens.get("FENCING_TOKEN"))
     timeout: float = 5.0
     max_retries: int = 2
     backoff_factor: float = 0.5
@@ -160,6 +219,18 @@ class IpcClient:
         # Should not reach here, but just in case
         raise IpcError(0, f"Request failed after retries: {last_exc}")
 
+    def report_tattle(self, mas_id: str, detail: str = "") -> None:
+        """Report an unreachable MAS to the grid for investigation."""
+        try:
+            self._request("POST", "/api/tattle", json={
+                "masId": mas_id,
+                "nodeId": os.environ.get("AURAGRID_NODE_ID", ""),
+                "failureCount": 1,
+                "detail": detail,
+            })
+        except Exception:
+            pass  # Tattle failure must not mask original error
+
 
 class AsyncIpcClient:
     """Asynchronous HTTP client for the AuraGrid IPC bridge.
@@ -231,3 +302,15 @@ class AsyncIpcClient:
                 raise IpcError(0, f"Transport error: {exc}") from exc
         # Should not reach here, but just in case
         raise IpcError(0, f"Request failed after retries: {last_exc}")
+
+    async def report_tattle(self, mas_id: str, detail: str = "") -> None:
+        """Report an unreachable MAS to the grid for investigation."""
+        try:
+            await self._request("POST", "/api/tattle", json={
+                "masId": mas_id,
+                "nodeId": os.environ.get("AURAGRID_NODE_ID", ""),
+                "failureCount": 1,
+                "detail": detail,
+            })
+        except Exception:
+            pass  # Tattle failure must not mask original error

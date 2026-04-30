@@ -34,6 +34,7 @@ from .event_client import AsyncEventClient, EventClient
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
 from .service_server import ServiceServer
+from .storage_client import AsyncStorageClient, StorageClient
 
 logger = logging.getLogger("auragrid.grid_context")
 
@@ -67,6 +68,7 @@ class GridContext:
         self._membership: Optional[CellMembership] = None
         self._governance: Optional[GovernanceClient] = None
         self._events: Optional[EventClient] = None
+        self._storage: Optional[StorageClient] = None
         self._service_servers: list[ServiceServer] = []
 
         if service_instances:
@@ -114,6 +116,13 @@ class GridContext:
         if self._events is None:
             self._events = EventClient(self._ipc_client)
         return self._events
+
+    @property
+    def storage(self) -> StorageClient:
+        """Grid storage client for file I/O including range reads."""
+        if self._storage is None:
+            self._storage = StorageClient(self._ipc_client)
+        return self._storage
 
     # ----- grid identity -----
 
@@ -210,6 +219,7 @@ class AsyncGridContext:
         self._membership: Optional[AsyncCellMembership] = None
         self._governance: Optional[AsyncGovernanceClient] = None
         self._events: Optional[AsyncEventClient] = None
+        self._storage: Optional[AsyncStorageClient] = None
         self._service_servers: list[ServiceServer] = []
         self._pending_instances = service_instances
 
@@ -258,6 +268,13 @@ class AsyncGridContext:
         if self._events is None:
             self._events = AsyncEventClient(self._ipc_client)
         return self._events
+
+    @property
+    def storage(self) -> AsyncStorageClient:
+        """Grid storage client for file I/O including range reads (async)."""
+        if self._storage is None:
+            self._storage = AsyncStorageClient(self._ipc_client)
+        return self._storage
 
     # ----- grid identity -----
 
