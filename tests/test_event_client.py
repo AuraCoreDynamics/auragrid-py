@@ -451,3 +451,246 @@ class TestAsyncEventClient:
             await events.list_topics()
         assert exc_info.value.status_code == 501
         await ipc.close()
+
+
+# ─── Subscribe Backoff Tests ─────────────────────────────────────────────────
+
+
+class TestAsyncSubscribeBackoff:
+    """Tests for exponential backoff in AsyncEventClient.subscribe()."""
+
+    @pytest.mark.asyncio
+    async def test_async_subscribe_exponential_backoff(self, ipc_options: IpcOptions) -> None:
+        """Sleep intervals double on empty consume, reset when events arrive."""
+        consume_call = 0
+        sleep_intervals: list[float] = []
+
+        async def mock_sleep(seconds: float) -> None:
+            sleep_intervals.append(seconds)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal consume_call
+            url = str(request.url)
+            if request.method == "GET" and "/markers/" in url:
+                return make_json_response({"topicId": "t1", "sequenceNumber": None, "consumerId": "c1"})
+            if request.method == "PUT" and "/markers/" in url:
+                return make_json_response({"ok": True})
+            if request.method == "GET" and "/cell/events/" in url:
+                consume_call += 1
+                if consume_call <= 3:
+                    return make_json_response({"events": []})
+                if consume_call == 4:
+                    return make_json_response({"events": [_sample_event_json(seq=1, topic="t1")]})
+                return make_json_response({"events": []})
+            return make_json_response({"error": "unexpected"}, status_code=404)
+
+        ipc_options.max_retries = 0
+        ipc, events = _make_async_client(handler, ipc_options)
+
+        import unittest.mock
+        with unittest.mock.patch("auragrid.event_client.asyncio.sleep", side_effect=mock_sleep):
+            received = []
+            async for event in events.subscribe("t1", consumer_id="c1", interval=1.0, max_backoff=30.0):
+                received.append(event)
+                if len(received) >= 1:
+                    break
+
+        # 3 empty polls -> sleeps of 1.0, 2.0, 4.0
+        assert len(sleep_intervals) == 3
+        assert sleep_intervals[0] == pytest.approx(1.0)
+        assert sleep_intervals[1] == pytest.approx(2.0)
+        assert sleep_intervals[2] == pytest.approx(4.0)
+        assert received[0].sequence_number == 1
+        await ipc.close()
+
+    @pytest.mark.asyncio
+    async def test_async_subscribe_max_backoff_cap(self, ipc_options: IpcOptions) -> None:
+        """Sleep never exceeds max_backoff."""
+        consume_call = 0
+        sleep_intervals: list[float] = []
+
+        async def mock_sleep(seconds: float) -> None:
+            sleep_intervals.append(seconds)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal consume_call
+            url = str(request.url)
+            if request.method == "GET" and "/markers/" in url:
+                return make_json_response({"topicId": "t1", "sequenceNumber": None, "consumerId": "c1"})
+            if request.method == "GET" and "/cell/events/" in url:
+                consume_call += 1
+                if consume_call <= 10:
+                    return make_json_response({"events": []})
+                return make_json_response({"events": [_sample_event_json(seq=1, topic="t1")]})
+            if request.method == "PUT" and "/markers/" in url:
+                return make_json_response({"ok": True})
+            return make_json_response({"error": "unexpected"}, status_code=404)
+
+        ipc_options.max_retries = 0
+        ipc, events = _make_async_client(handler, ipc_options)
+
+        import unittest.mock
+        with unittest.mock.patch("auragrid.event_client.asyncio.sleep", side_effect=mock_sleep):
+            async for event in events.subscribe("t1", consumer_id="c1", interval=1.0, max_backoff=8.0):
+                break
+
+        # 1.0, 2.0, 4.0, 8.0, 8.0, 8.0, ... (capped at 8.0)
+        assert all(s <= 8.0 for s in sleep_intervals)
+        assert sleep_intervals[3] == pytest.approx(8.0)
+        await ipc.close()
+
+    @pytest.mark.asyncio
+    async def test_async_subscribe_marker_committed_per_batch(self, ipc_options: IpcOptions) -> None:
+        """set_marker called once per batch, not per event."""
+        marker_updates: list[dict] = []
+        consume_call = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal consume_call
+            url = str(request.url)
+            if request.method == "GET" and "/markers/" in url:
+                return make_json_response({"topicId": "t1", "sequenceNumber": None, "consumerId": "c1"})
+            if request.method == "PUT" and "/markers/" in url:
+                marker_updates.append(json.loads(request.content))
+                return make_json_response({"ok": True})
+            if request.method == "GET" and "/cell/events/" in url:
+                consume_call += 1
+                if consume_call == 1:
+                    return make_json_response({
+                        "events": [
+                            _sample_event_json(seq=i, topic="t1")
+                            for i in range(1, 6)
+                        ],
+                    })
+                # Second batch: 1 event to trigger break after marker commit
+                return make_json_response({
+                    "events": [_sample_event_json(seq=6, topic="t1")],
+                })
+            return make_json_response({"error": "unexpected"}, status_code=404)
+
+        ipc_options.max_retries = 0
+        ipc, events = _make_async_client(handler, ipc_options)
+
+        count = 0
+        async for event in events.subscribe("t1", consumer_id="c1", interval=0.01):
+            count += 1
+            # Break on first event of batch 2 — batch 1's marker is already committed
+            if count >= 6:
+                break
+
+        # Batch 1 (5 events) -> 1 marker update at seq=5
+        assert len(marker_updates) >= 1
+        assert marker_updates[0]["sequenceNumber"] == 5
+        await ipc.close()
+
+
+class TestSyncSubscribeBackoff:
+    """Tests for exponential backoff in EventClient.subscribe()."""
+
+    def test_sync_subscribe_exponential_backoff(self, ipc_options: IpcOptions) -> None:
+        """Sleep intervals double on empty consume, reset when events arrive."""
+        consume_call = 0
+        sleep_intervals: list[float] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal consume_call
+            url = str(request.url)
+            if request.method == "GET" and "/markers/" in url:
+                return make_json_response({"topicId": "t1", "sequenceNumber": None, "consumerId": "c1"})
+            if request.method == "PUT" and "/markers/" in url:
+                return make_json_response({"ok": True})
+            if request.method == "GET" and "/cell/events/" in url:
+                consume_call += 1
+                if consume_call <= 3:
+                    return make_json_response({"events": []})
+                return make_json_response({"events": [_sample_event_json(seq=1, topic="t1")]})
+            return make_json_response({"error": "unexpected"}, status_code=404)
+
+        ipc_options.max_retries = 0
+        ipc, events = _make_sync_client(handler, ipc_options)
+
+        import unittest.mock
+        with unittest.mock.patch("auragrid.event_client.time.sleep", side_effect=lambda s: sleep_intervals.append(s)):
+            received = []
+            for event in events.subscribe("t1", consumer_id="c1", interval=1.0, max_backoff=30.0):
+                received.append(event)
+                if len(received) >= 1:
+                    break
+
+        assert len(sleep_intervals) == 3
+        assert sleep_intervals[0] == pytest.approx(1.0)
+        assert sleep_intervals[1] == pytest.approx(2.0)
+        assert sleep_intervals[2] == pytest.approx(4.0)
+        assert received[0].sequence_number == 1
+        ipc.close()
+
+    def test_sync_subscribe_yields_events(self, ipc_options: IpcOptions) -> None:
+        """Events yielded in correct order."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if request.method == "GET" and "/markers/" in url:
+                return make_json_response({"topicId": "t1", "sequenceNumber": None, "consumerId": "c1"})
+            if request.method == "PUT" and "/markers/" in url:
+                return make_json_response({"ok": True})
+            if request.method == "GET" and "/cell/events/" in url:
+                return make_json_response({
+                    "events": [
+                        _sample_event_json(seq=1, topic="t1"),
+                        _sample_event_json(seq=2, topic="t1"),
+                        _sample_event_json(seq=3, topic="t1"),
+                    ],
+                })
+            return make_json_response({"error": "unexpected"}, status_code=404)
+
+        ipc_options.max_retries = 0
+        ipc, events = _make_sync_client(handler, ipc_options)
+
+        received = []
+        for event in events.subscribe("t1", consumer_id="c1", interval=0.01):
+            received.append(event)
+            if len(received) >= 3:
+                break
+
+        assert len(received) == 3
+        assert [e.sequence_number for e in received] == [1, 2, 3]
+        ipc.close()
+
+    def test_sync_subscribe_marker_committed_per_batch(self, ipc_options: IpcOptions) -> None:
+        """set_marker called once per batch, not per event."""
+        marker_updates: list[dict] = []
+        consume_call = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal consume_call
+            url = str(request.url)
+            if request.method == "GET" and "/markers/" in url:
+                return make_json_response({"topicId": "t1", "sequenceNumber": None, "consumerId": "c1"})
+            if request.method == "PUT" and "/markers/" in url:
+                marker_updates.append(json.loads(request.content))
+                return make_json_response({"ok": True})
+            if request.method == "GET" and "/cell/events/" in url:
+                consume_call += 1
+                if consume_call == 1:
+                    return make_json_response({
+                        "events": [
+                            _sample_event_json(seq=i, topic="t1")
+                            for i in range(1, 6)
+                        ],
+                    })
+                return make_json_response({
+                    "events": [_sample_event_json(seq=6, topic="t1")],
+                })
+            return make_json_response({"error": "unexpected"}, status_code=404)
+
+        ipc_options.max_retries = 0
+        ipc, events = _make_sync_client(handler, ipc_options)
+
+        count = 0
+        for event in events.subscribe("t1", consumer_id="c1", interval=0.01):
+            count += 1
+            if count >= 6:
+                break
+
+        assert len(marker_updates) >= 1
+        assert marker_updates[0]["sequenceNumber"] == 5
+        ipc.close()

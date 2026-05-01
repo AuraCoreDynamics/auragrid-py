@@ -11,8 +11,10 @@ and ``IMarkerStore`` from ``AuraGrid.Abstractions.Eventing``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-from typing import AsyncIterator, Optional
+import time
+from typing import AsyncIterator, Iterator, Optional
 
 from .event_models import AuraEventDto, ConsumeResponse, PublishRequest, WalMarkerDto
 from .ipc import AsyncIpcClient, IpcClient
@@ -21,6 +23,9 @@ from .ipc import AsyncIpcClient, IpcClient
 def _default_consumer_id() -> str:
     """Return the default consumer ID from AURAGRID_MAS_ID, or 'default'."""
     return os.environ.get("AURAGRID_MAS_ID", "default")
+
+
+_logger = logging.getLogger(__name__)
 
 
 class EventClient:
@@ -149,6 +154,63 @@ class EventClient:
             f"/cell/events/markers/{cid}/{topic_id}",
             json={"sequenceNumber": sequence_number},
         )
+
+    # ─── Streaming ────────────────────────────────────────────────────────
+
+    def subscribe(
+        self,
+        topic_id: str,
+        consumer_id: Optional[str] = None,
+        count: int = 100,
+        interval: float = 1.0,
+        max_backoff: float = 30.0,
+    ) -> Iterator[AuraEventDto]:
+        """Subscribe to a topic, yielding events as they arrive (sync).
+
+        Polls ``consume()`` in a loop with exponential backoff on idle,
+        yields individual events, and automatically updates the consumer
+        marker after each batch.
+
+        Args:
+            topic_id: Topic to subscribe to.
+            consumer_id: Consumer identifier (defaults to ``AURAGRID_MAS_ID``).
+            count: Maximum events per poll batch.
+            interval: Base polling interval in seconds (also used after events arrive).
+            max_backoff: Maximum backoff interval in seconds during idle periods.
+
+        Yields:
+            Individual ``AuraEventDto`` instances as they become available.
+        """
+        cid = consumer_id or _default_consumer_id()
+        marker = self.get_marker(topic_id, cid)
+        after = marker.sequence_number if marker else 0
+        current_interval = interval
+
+        while True:
+            try:
+                events = self.consume(topic_id, after=after, count=count)
+            except Exception:
+                _logger.warning("subscribe consume error on %s, backing off", topic_id, exc_info=True)
+                time.sleep(current_interval)
+                current_interval = min(current_interval * 2, max_backoff)
+                continue
+
+            if not events:
+                time.sleep(current_interval)
+                current_interval = min(current_interval * 2, max_backoff)
+                continue
+
+            current_interval = interval
+
+            for event in events:
+                yield event
+
+            last_seq = events[-1].sequence_number
+            try:
+                self.set_marker(topic_id, last_seq, cid)
+            except Exception:
+                _logger.warning("subscribe marker commit failed on %s at seq %d", topic_id, last_seq, exc_info=True)
+            after = last_seq
 
 
 class AsyncEventClient:
@@ -286,17 +348,20 @@ class AsyncEventClient:
         consumer_id: Optional[str] = None,
         count: int = 100,
         interval: float = 1.0,
+        max_backoff: float = 30.0,
     ) -> AsyncIterator[AuraEventDto]:
         """Subscribe to a topic, yielding events as they arrive.
 
-        Polls ``consume()`` in a loop, yields individual events, and
-        automatically updates the consumer marker after each batch.
+        Polls ``consume()`` in a loop with exponential backoff on idle,
+        yields individual events, and automatically updates the consumer
+        marker after each batch.
 
         Args:
             topic_id: Topic to subscribe to.
             consumer_id: Consumer identifier (defaults to ``AURAGRID_MAS_ID``).
             count: Maximum events per poll batch.
-            interval: Polling interval in seconds when no new events are available.
+            interval: Base polling interval in seconds (also used after events arrive).
+            max_backoff: Maximum backoff interval in seconds during idle periods.
 
         Yields:
             Individual ``AuraEventDto`` instances as they become available.
@@ -306,18 +371,32 @@ class AsyncEventClient:
         # Start from the last committed marker, or from the beginning
         marker = await self.get_marker(topic_id, cid)
         after = marker.sequence_number if marker else 0
+        current_interval = interval
 
         while True:
-            events = await self.consume(topic_id, after=after, count=count)
+            try:
+                events = await self.consume(topic_id, after=after, count=count)
+            except Exception:
+                _logger.warning("subscribe consume error on %s, backing off", topic_id, exc_info=True)
+                await asyncio.sleep(current_interval)
+                current_interval = min(current_interval * 2, max_backoff)
+                continue
 
             if not events:
-                await asyncio.sleep(interval)
+                await asyncio.sleep(current_interval)
+                current_interval = min(current_interval * 2, max_backoff)
                 continue
+
+            # Reset backoff on successful event retrieval
+            current_interval = interval
 
             for event in events:
                 yield event
 
             # Update marker to the last event in the batch
             last_seq = events[-1].sequence_number
-            await self.set_marker(topic_id, last_seq, cid)
+            try:
+                await self.set_marker(topic_id, last_seq, cid)
+            except Exception:
+                _logger.warning("subscribe marker commit failed on %s at seq %d", topic_id, last_seq, exc_info=True)
             after = last_seq
