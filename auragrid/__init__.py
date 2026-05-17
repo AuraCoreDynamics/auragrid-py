@@ -2,6 +2,7 @@
 
 from .cell_config import AsyncCellConfiguration, CellConfiguration
 from .cell_membership import AsyncCellMembership, CellMembership
+from .chaos_client import AsyncChaosClient, ChaosClient
 from .decorators import auragrid_method, auragrid_service
 from .descriptor import generate_descriptor, save_descriptor
 from .event_client import AsyncEventClient, EventClient
@@ -9,8 +10,11 @@ from .event_models import AuraEventDto, ConsumeResponse, PublishRequest, WalMark
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .grid_context import AsyncGridContext, GridContext
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
+from .lease_client import AsyncLeaseClient, LeaseClient
 from .lifecycle import LifecycleCallback, LifecycleContext, LifecyclePhase
+from .registry_client import AsyncRegistryClient, RegistryClient
 from .service_server import ServiceServer
+from .storage_client import AsyncStorageClient, StorageClient
 from .layer0 import (
     Layer0Client,
     SignatureBlock,
@@ -54,6 +58,9 @@ __all__ = [
     # Cell membership
     "CellMembership",
     "AsyncCellMembership",
+    # Chaos
+    "ChaosClient",
+    "AsyncChaosClient",
     # Governance
     "GovernanceClient",
     "AsyncGovernanceClient",
@@ -67,6 +74,15 @@ __all__ = [
     # Grid context
     "GridContext",
     "AsyncGridContext",
+    # Lease
+    "LeaseClient",
+    "AsyncLeaseClient",
+    # Registry
+    "RegistryClient",
+    "AsyncRegistryClient",
+    # Storage
+    "StorageClient",
+    "AsyncStorageClient",
     # Service server
     "ServiceServer",
     # Layer 0

@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 from .cell_config import AsyncCellConfiguration, CellConfiguration
 from .cell_membership import AsyncCellMembership, CellMembership
+from .chaos_client import AsyncChaosClient, ChaosClient
 from .event_client import AsyncEventClient, EventClient
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
@@ -73,6 +74,7 @@ class GridContext:
         self._storage: Optional[StorageClient] = None
         self._lease: Optional[LeaseClient] = None
         self._registry: Optional[RegistryClient] = None
+        self._chaos: Optional[ChaosClient] = None
         self._service_servers: list[ServiceServer] = []
 
         if service_instances:
@@ -146,6 +148,13 @@ class GridContext:
         if self._registry is None:
             self._registry = RegistryClient(self._ipc_client)
         return self._registry
+
+    @property
+    def chaos(self) -> ChaosClient:
+        """Grid chaos injection client (adversarial testing only)."""
+        if self._chaos is None:
+            self._chaos = ChaosClient(self._ipc_client)
+        return self._chaos
 
     # ----- grid identity -----
 
@@ -245,6 +254,7 @@ class AsyncGridContext:
         self._storage: Optional[AsyncStorageClient] = None
         self._lease: Optional[AsyncLeaseClient] = None
         self._registry: Optional[AsyncRegistryClient] = None
+        self._chaos: Optional[AsyncChaosClient] = None
         self._service_servers: list[ServiceServer] = []
         self._pending_instances = service_instances
 
@@ -319,6 +329,13 @@ class AsyncGridContext:
         if self._registry is None:
             self._registry = AsyncRegistryClient(self._ipc_client)
         return self._registry
+
+    @property
+    def chaos(self) -> AsyncChaosClient:
+        """Grid chaos injection client (async, adversarial testing only)."""
+        if self._chaos is None:
+            self._chaos = AsyncChaosClient(self._ipc_client)
+        return self._chaos
 
     # ----- grid identity -----
 
