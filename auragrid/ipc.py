@@ -222,7 +222,7 @@ class IpcClient:
     def report_tattle(self, mas_id: str, detail: str = "") -> None:
         """Report an unreachable MAS to the grid for investigation."""
         try:
-            self._request("POST", "/api/tattle", json={
+            self._request("POST", "/cell/tattle", json={
                 "masId": mas_id,
                 "nodeId": os.environ.get("AURAGRID_NODE_ID", ""),
                 "failureCount": 1,
@@ -306,7 +306,7 @@ class AsyncIpcClient:
     async def report_tattle(self, mas_id: str, detail: str = "") -> None:
         """Report an unreachable MAS to the grid for investigation."""
         try:
-            await self._request("POST", "/api/tattle", json={
+            await self._request("POST", "/cell/tattle", json={
                 "masId": mas_id,
                 "nodeId": os.environ.get("AURAGRID_NODE_ID", ""),
                 "failureCount": 1,

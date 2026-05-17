@@ -85,6 +85,65 @@ class StorageClient:
         resp.raise_for_status()
         return resp.json()
 
+    def write(self, path: str, data: bytes, fencing_token: Optional[int] = None) -> None:
+        """Write data to a path in grid storage.
+        
+        Args:
+            path: Storage-relative path.
+            data: Bytes to write.
+            fencing_token: Optional fencing token to validate against lease.
+        """
+        params = {"path": path}
+        if fencing_token is not None:
+            params["fencingToken"] = str(fencing_token)
+            
+        resp = self._ipc.post(
+            "/cell/storage/write",
+            params=params,
+            content=data,
+        )
+        resp.raise_for_status()
+
+    def append(self, path: str, data: bytes, fencing_token: Optional[int] = None) -> int:
+        """Append data to an existing file in grid storage.
+        
+        Args:
+            path: Storage-relative path.
+            data: Bytes to append.
+            fencing_token: Optional fencing token to validate against lease.
+            
+        Returns:
+            New file length after append.
+        """
+        params = {"path": path}
+        if fencing_token is not None:
+            params["fencingToken"] = str(fencing_token)
+            
+        resp = self._ipc.post(
+            "/cell/storage/append",
+            params=params,
+            content=data,
+        )
+        resp.raise_for_status()
+        return resp.json().get("length", 0)
+
+    def delete(self, path: str, recursive: bool = False) -> bool:
+        """Delete a file or directory in grid storage.
+        
+        Args:
+            path: Path to delete.
+            recursive: Whether to recursively delete directories.
+            
+        Returns:
+            True if deleted, False if not found.
+        """
+        resp = self._ipc.delete(
+            "/cell/storage/delete",
+            params={"path": path, "recursive": str(recursive).lower()},
+        )
+        resp.raise_for_status()
+        return resp.json().get("deleted", False)
+
 
 class AsyncStorageClient:
     """Asynchronous storage client backed by IPC bridge.
@@ -139,3 +198,39 @@ class AsyncStorageClient:
             return None
         resp.raise_for_status()
         return resp.json()
+
+    async def write(self, path: str, data: bytes, fencing_token: Optional[int] = None) -> None:
+        """Write data to a path in grid storage."""
+        params = {"path": path}
+        if fencing_token is not None:
+            params["fencingToken"] = str(fencing_token)
+
+        resp = await self._ipc.post(
+            "/cell/storage/write",
+            params=params,
+            content=data,
+        )
+        resp.raise_for_status()
+
+    async def append(self, path: str, data: bytes, fencing_token: Optional[int] = None) -> int:
+        """Append data to an existing file in grid storage."""
+        params = {"path": path}
+        if fencing_token is not None:
+            params["fencingToken"] = str(fencing_token)
+
+        resp = await self._ipc.post(
+            "/cell/storage/append",
+            params=params,
+            content=data,
+        )
+        resp.raise_for_status()
+        return resp.json().get("length", 0)
+
+    async def delete(self, path: str, recursive: bool = False) -> bool:
+        """Delete a file or directory in grid storage."""
+        resp = await self._ipc.delete(
+            "/cell/storage/delete",
+            params={"path": path, "recursive": str(recursive).lower()},
+        )
+        resp.raise_for_status()
+        return resp.json().get("deleted", False)

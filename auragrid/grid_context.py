@@ -33,6 +33,7 @@ from .cell_membership import AsyncCellMembership, CellMembership
 from .event_client import AsyncEventClient, EventClient
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
+from .lease_client import AsyncLeaseClient, LeaseClient
 from .service_server import ServiceServer
 from .storage_client import AsyncStorageClient, StorageClient
 
@@ -69,6 +70,7 @@ class GridContext:
         self._governance: Optional[GovernanceClient] = None
         self._events: Optional[EventClient] = None
         self._storage: Optional[StorageClient] = None
+        self._lease: Optional[LeaseClient] = None
         self._service_servers: list[ServiceServer] = []
 
         if service_instances:
@@ -97,6 +99,11 @@ class GridContext:
         return self._config
 
     @property
+    def ipc(self) -> IpcClient:
+        """The underlying low-level IPC client."""
+        return self._ipc_client
+
+    @property
     def membership(self) -> CellMembership:
         """Cell membership client."""
         if self._membership is None:
@@ -123,6 +130,13 @@ class GridContext:
         if self._storage is None:
             self._storage = StorageClient(self._ipc_client)
         return self._storage
+
+    @property
+    def lease(self) -> LeaseClient:
+        """Cell lease management client."""
+        if self._lease is None:
+            self._lease = LeaseClient(self._ipc_client)
+        return self._lease
 
     # ----- grid identity -----
 
@@ -220,6 +234,7 @@ class AsyncGridContext:
         self._governance: Optional[AsyncGovernanceClient] = None
         self._events: Optional[AsyncEventClient] = None
         self._storage: Optional[AsyncStorageClient] = None
+        self._lease: Optional[AsyncLeaseClient] = None
         self._service_servers: list[ServiceServer] = []
         self._pending_instances = service_instances
 
@@ -249,6 +264,11 @@ class AsyncGridContext:
         return self._config
 
     @property
+    def ipc(self) -> AsyncIpcClient:
+        """The underlying async IPC client."""
+        return self._ipc_client
+
+    @property
     def membership(self) -> AsyncCellMembership:
         """Cell membership client (async)."""
         if self._membership is None:
@@ -275,6 +295,13 @@ class AsyncGridContext:
         if self._storage is None:
             self._storage = AsyncStorageClient(self._ipc_client)
         return self._storage
+
+    @property
+    def lease(self) -> AsyncLeaseClient:
+        """Cell lease management client (async)."""
+        if self._lease is None:
+            self._lease = AsyncLeaseClient(self._ipc_client)
+        return self._lease
 
     # ----- grid identity -----
 
