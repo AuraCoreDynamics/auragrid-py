@@ -34,6 +34,7 @@ from .event_client import AsyncEventClient, EventClient
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
 from .lease_client import AsyncLeaseClient, LeaseClient
+from .registry_client import AsyncRegistryClient, RegistryClient
 from .service_server import ServiceServer
 from .storage_client import AsyncStorageClient, StorageClient
 
@@ -71,6 +72,7 @@ class GridContext:
         self._events: Optional[EventClient] = None
         self._storage: Optional[StorageClient] = None
         self._lease: Optional[LeaseClient] = None
+        self._registry: Optional[RegistryClient] = None
         self._service_servers: list[ServiceServer] = []
 
         if service_instances:
@@ -137,6 +139,13 @@ class GridContext:
         if self._lease is None:
             self._lease = LeaseClient(self._ipc_client)
         return self._lease
+
+    @property
+    def registry(self) -> RegistryClient:
+        """Cell service registry client."""
+        if self._registry is None:
+            self._registry = RegistryClient(self._ipc_client)
+        return self._registry
 
     # ----- grid identity -----
 
@@ -235,6 +244,7 @@ class AsyncGridContext:
         self._events: Optional[AsyncEventClient] = None
         self._storage: Optional[AsyncStorageClient] = None
         self._lease: Optional[AsyncLeaseClient] = None
+        self._registry: Optional[AsyncRegistryClient] = None
         self._service_servers: list[ServiceServer] = []
         self._pending_instances = service_instances
 
@@ -302,6 +312,13 @@ class AsyncGridContext:
         if self._lease is None:
             self._lease = AsyncLeaseClient(self._ipc_client)
         return self._lease
+
+    @property
+    def registry(self) -> AsyncRegistryClient:
+        """Cell service registry client (async)."""
+        if self._registry is None:
+            self._registry = AsyncRegistryClient(self._ipc_client)
+        return self._registry
 
     # ----- grid identity -----
 
