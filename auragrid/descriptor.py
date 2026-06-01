@@ -81,6 +81,8 @@ def generate_descriptor(cls: type) -> dict[str, Any]:
         }
         if method_meta.get("description"):
             method_desc["description"] = method_meta["description"]
+        if method_meta.get("required_role"):
+            method_desc["requiredRole"] = method_meta["required_role"]
 
         methods.append(method_desc)
 

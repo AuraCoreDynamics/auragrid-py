@@ -48,20 +48,21 @@ def auragrid_service(
 def auragrid_method(
     name: Optional[str] = None,
     description: Optional[str] = None,
+    required_role: Optional[str] = None,
 ) -> Callable[[F], F]:
     """Method decorator that marks a method as an AuraGrid remotable operation.
 
     Args:
         name: Override the method name (defaults to function name).
         description: Human-readable description of the method.
-
-    The decorator stores metadata in ``func._auragrid_method_meta``.
+        required_role: Optional GridRole required to invoke this method.
     """
 
     def decorator(func: F) -> F:
         func._auragrid_method_meta = {  # type: ignore[attr-defined]
             "name": name or func.__name__,
             "description": description,
+            "required_role": required_role,
         }
         return func
 
