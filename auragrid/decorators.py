@@ -49,6 +49,7 @@ def auragrid_method(
     name: Optional[str] = None,
     description: Optional[str] = None,
     required_role: Optional[str] = None,
+    required_claim: Optional[str] = None,
 ) -> Callable[[F], F]:
     """Method decorator that marks a method as an AuraGrid remotable operation.
 
@@ -56,6 +57,7 @@ def auragrid_method(
         name: Override the method name (defaults to function name).
         description: Human-readable description of the method.
         required_role: Optional GridRole required to invoke this method.
+        required_claim: Optional claim requirement (Type:Value) required to invoke this method.
     """
 
     def decorator(func: F) -> F:
@@ -63,6 +65,7 @@ def auragrid_method(
             "name": name or func.__name__,
             "description": description,
             "required_role": required_role,
+            "required_claim": required_claim,
         }
         return func
 

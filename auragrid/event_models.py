@@ -33,6 +33,8 @@ class AuraEventDto(BaseModel):
     source_node_id: str = Field(alias="sourceNodeId")
     event_type: Optional[str] = Field(default=None, alias="eventType")
     payload: str = Field(alias="payload", description="Base64-encoded opaque payload")
+    signature: Optional[str] = Field(default=None, alias="signature", description="Base64-encoded digital signature")
+    certificate_pem: Optional[str] = Field(default=None, alias="certificatePem", description="Certificate used for signing")
 
     @property
     def payload_bytes(self) -> bytes:
