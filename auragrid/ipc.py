@@ -117,7 +117,7 @@ class IpcOptions:
     @property
     def base_url(self) -> str:
         """Build the base URL for IPC requests."""
-        return f"http://localhost:{self.port}"
+        return f"http://127.0.0.1:{self.port}"
 
 
 def _build_headers(token: str, fencing_token: str | None = None) -> dict[str, str]:
