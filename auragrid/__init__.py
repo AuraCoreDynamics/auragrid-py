@@ -12,6 +12,7 @@ from .grid_context import AsyncGridContext, GridContext
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
 from .lease_client import AsyncLeaseClient, LeaseClient
 from .lifecycle import LifecycleCallback, LifecycleContext, LifecyclePhase
+from .discovery import LocalNodeDiscovery, DiscoveredNode
 from .registry_client import AsyncRegistryClient, RegistryClient
 from .service_server import ServiceServer
 from .storage_client import AsyncStorageClient, StorageClient
@@ -102,5 +103,7 @@ __all__ = [
     "GovernanceDecision",
     "AuditEntry",
     "UserRolesResponse",
+    "LocalNodeDiscovery",
+    "DiscoveredNode",
     "IpcErrorResponse",
 ]
