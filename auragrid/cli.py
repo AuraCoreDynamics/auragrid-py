@@ -2,9 +2,20 @@
 
 Usage::
 
-    python -m auragrid generate-descriptor my_module.MyService
-    python -m auragrid pki requests
-    python -m auragrid pki approve <request-id> --ca-key ./ca.pfx
+    auragrid doctor
+    auragrid status
+    auragrid init my-worker --template python
+    auragrid validate my-worker
+    auragrid pack my-worker -o my-worker.agp
+    auragrid dev my-worker
+    auragrid apps deploy my-worker.agp
+    auragrid apps list
+    auragrid apps restart <masId>
+    auragrid apps stop <masId>
+    auragrid logs [masId]
+    auragrid completion powershell
+    auragrid generate-descriptor my_module.MyService
+    auragrid pki requests
 """
 
 from __future__ import annotations
@@ -12,23 +23,101 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import importlib
 import json
 import os
+import re
+import subprocess
 import sys
+import tempfile
+import time
+import zipfile
 from typing import Any
 
 import httpx
 
 from .descriptor import save_descriptor
 
+DEFAULT_MGMT_URL = os.environ.get("AURAGRID_URL", "http://localhost:7077")
+
+
+def _get_client(args: argparse.Namespace) -> httpx.Client:
+    """Build an httpx.Client configured with optional mTLS credentials."""
+    client_opts: dict[str, Any] = {"verify": False, "timeout": 10.0}
+    if hasattr(args, "cert") and args.cert:
+        client_opts["cert"] = (args.cert, args.key) if getattr(args, "key", None) else args.cert
+    return httpx.Client(**client_opts)
+
 
 def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="auragrid",
-        description="AuraGrid Python SDK CLI tools",
+        description="AuraGrid Developer & Management CLI",
+    )
+    parser.add_argument(
+        "--url",
+        default=DEFAULT_MGMT_URL,
+        help=f"AuraGrid Management API URL (default: {DEFAULT_MGMT_URL})",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # doctor command
+    subparsers.add_parser("doctor", help="Run local preflight diagnostics on .NET, Python, containers, and node connectivity")
+
+    # status command
+    subparsers.add_parser("status", help="Display status and health of the active AuraGrid node")
+
+    # init command
+    init_parser = subparsers.add_parser("init", help="Scaffold a new AuraGrid application with manifest, entrypoint, and config")
+    init_parser.add_argument("name", help="Application ID / directory name")
+    init_parser.add_argument("--template", choices=["python", "container", "csharp", "auracode-agent", "router-worker"], default="python", help="App template preset")
+
+    # code command
+    code_parser = subparsers.add_parser("code", help="Launch AuraCode assistant connected to the active AuraGrid node")
+    code_parser.add_argument("args", nargs="*", help="Arguments forwarded to auracode")
+
+    # validate command
+    validate_parser = subparsers.add_parser("validate", help="Validate an application manifest or .agp package before deployment")
+    validate_parser.add_argument("path", default=".", nargs="?", help="Application directory with app.manifest.json or .agp bundle file")
+
+    # pack command
+    pack_parser = subparsers.add_parser("pack", help="Package an application directory with app.manifest.json into a .agp bundle")
+    pack_parser.add_argument("directory", default=".", nargs="?", help="Application directory path (default: current directory)")
+    pack_parser.add_argument("--output", "-o", help="Target .agp package file path")
+
+    # dev command
+    dev_parser = subparsers.add_parser("dev", help="Start live development mode with auto-reload, file watching, and log streaming")
+    dev_parser.add_argument("directory", default=".", nargs="?", help="Application directory path (default: current directory)")
+    dev_parser.add_argument("--interval", "-i", type=float, default=1.0, help="Polling interval in seconds (default: 1.0)")
+
+    # completion command
+    comp_parser = subparsers.add_parser("completion", help="Generate shell auto-completion script for PowerShell or Bash")
+    comp_parser.add_argument("shell", choices=["powershell", "bash"], default="powershell", nargs="?", help="Target shell (default: powershell)")
+
+    # apps group
+    apps_parser = subparsers.add_parser("apps", help="Manage applications and deployments")
+    apps_sub = apps_parser.add_subparsers(dest="apps_command", required=True)
+
+    apps_sub.add_parser("list", help="List registered catalog applications and deployments")
+
+    deploy_parser = apps_sub.add_parser("deploy", help="Deploy an application bundle (.agp) or manifest (.json)")
+    deploy_parser.add_argument("path", help="Path to .agp bundle file or app.manifest.json")
+    deploy_parser.add_argument("--no-reconcile", action="store_true", help="Register in catalog only without immediate deployment")
+
+    remove_parser = apps_sub.add_parser("remove", help="Remove an application deployment")
+    remove_parser.add_argument("app_id", help="App ID to remove")
+
+    restart_parser = apps_sub.add_parser("restart", help="Restart an active MAS instance")
+    restart_parser.add_argument("mas_id", help="MAS ID to restart")
+
+    stop_parser = apps_sub.add_parser("stop", help="Stop an active MAS instance")
+    stop_parser.add_argument("mas_id", help="MAS ID to stop")
+
+    # logs command
+    logs_parser = subparsers.add_parser("logs", help="View and tail live node and MAS logs")
+    logs_parser.add_argument("mas_id", nargs="?", help="Optional MAS ID or 'node' (default: all logs)")
+    logs_parser.add_argument("--count", "-n", type=int, default=50, help="Number of recent log lines to display (default: 50)")
 
     # generate-descriptor command
     gen_parser = subparsers.add_parser(
@@ -50,27 +139,21 @@ def main() -> None:
     pki_parser = subparsers.add_parser("pki", help="PKI and Certificate management")
     pki_sub = pki_parser.add_subparsers(dest="pki_command", required=True)
 
-    # pki requests
     pki_sub.add_parser("requests", help="List pending Certificate Signing Requests (CSRs)")
 
-    # pki approve
     app_parser = pki_sub.add_parser("approve", help="Approve and sign a pending CSR")
     app_parser.add_argument("request_id", help="ID of the CSR to sign")
     app_parser.add_argument("--ca-key", required=True, help="Path to CA private key (PFX)")
-    app_parser.add_argument("--url", default="https://localhost:7087", help="Management API URL")
     app_parser.add_argument("--cert", help="Admin client certificate for mTLS (PEM)")
     app_parser.add_argument("--key", help="Admin client key for mTLS (PEM)")
 
-    # pki generate-root
     gen_root = pki_sub.add_parser("generate-root", help="Originate a brand new Root CA for a fresh grid")
     gen_root.add_argument("--subject", default="CN=AuraGrid-Genesis-CA", help="Subject name for the Root CA")
     gen_root.add_argument("--out", "-o", required=True, help="Output path for the CA private key (PFX)")
     gen_root.add_argument("--force-save", action="store_true", help="Save as Cell CA for auto-approval of bootstrap nodes")
-    gen_root.add_argument("--url", default="https://localhost:7087", help="Management API URL")
     gen_root.add_argument("--cert", help="Admin client certificate for mTLS (PEM)")
     gen_root.add_argument("--key", help="Admin client key for mTLS (PEM)")
 
-    # pki anchors
     anchor_parser = pki_sub.add_parser("anchors", help="Manage cell trust anchors")
     anchor_sub = anchor_parser.add_subparsers(dest="anchor_command", required=True)
     add_anc = anchor_sub.add_parser("add", help="Add a new trust anchor (PEM)")
@@ -78,7 +161,6 @@ def main() -> None:
     rem_anc = anchor_sub.add_parser("remove", help="Remove a trust anchor by thumbprint")
     rem_anc.add_argument("thumbprint", help="Thumbprint of the CA to remove")
 
-    # pki revoke
     rev_parser = pki_sub.add_parser("revoke", help="Revoke a node or identity")
     rev_parser.add_argument("id", help="Node ID or Identity to revoke")
     rev_parser.add_argument("--reason", default="Administrative revocation", help="Reason for revocation")
@@ -87,18 +169,36 @@ def main() -> None:
     svc_parser = subparsers.add_parser("service", help="Service management and invocation")
     svc_sub = svc_parser.add_subparsers(dest="svc_command", required=True)
 
-    # service call
     call_parser = svc_sub.add_parser("call", help="Invoke a method on a service")
     call_parser.add_argument("service", help="Service name")
     call_parser.add_argument("method", help="Method name")
     call_parser.add_argument("--data", "-d", help="JSON payload")
-    call_parser.add_argument("--url", default="https://localhost:8088", help="Service Proxy URL")
     call_parser.add_argument("--cert", help="Client certificate for mTLS (PEM)")
     call_parser.add_argument("--key", help="Client key for mTLS (PEM)")
 
     args = parser.parse_args()
 
-    if args.command == "generate-descriptor":
+    if args.command == "doctor":
+        _handle_doctor(args)
+    elif args.command == "status":
+        _handle_status(args)
+    elif args.command == "init":
+        _handle_init(args)
+    elif args.command == "code":
+        _handle_code(args)
+    elif args.command == "validate":
+        _handle_validate(args)
+    elif args.command == "pack":
+        _handle_pack(args)
+    elif args.command == "dev":
+        _handle_dev(args)
+    elif args.command == "completion":
+        _handle_completion(args)
+    elif args.command == "apps":
+        _handle_apps(args)
+    elif args.command == "logs":
+        _handle_logs(args)
+    elif args.command == "generate-descriptor":
         _generate_descriptor(args.class_path, args.output)
     elif args.command == "pki":
         _handle_pki(args)
@@ -106,21 +206,868 @@ def main() -> None:
         _handle_service(args)
 
 
+def _handle_doctor(args: argparse.Namespace) -> None:
+    """Run local preflight diagnostics on .NET, Python, containers, and node connectivity."""
+    print("AuraGrid Environment & Diagnostics Doctor")
+    print("=" * 60)
+
+    # 1. Python Check
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    py_ok = sys.version_info >= (3, 10)
+    print(f"[{'OK' if py_ok else 'WARN'}] Python Version: {py_ver} (>= 3.10 required)")
+
+    # 2. .NET SDK Check
+    dotnet_ver = None
+    try:
+        res = subprocess.run(["dotnet", "--version"], capture_output=True, text=True, timeout=5)
+        if res.returncode == 0:
+            dotnet_ver = res.stdout.strip()
+    except Exception:
+        pass
+    dotnet_ok = dotnet_ver is not None and dotnet_ver.startswith("10.")
+    print(f"[{'OK' if dotnet_ok else 'WARN'}] .NET SDK: {dotnet_ver or 'Not found'} (>= 10.0 recommended)")
+
+    # 3. Container Engine Check
+    container_engine = None
+    for eng in ["podman", "docker"]:
+        try:
+            res = subprocess.run([eng, "--version"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                container_engine = f"{eng} ({res.stdout.strip()})"
+                break
+        except Exception:
+            pass
+    print(f"[{'OK' if container_engine else 'INFO'}] Container Runtime: {container_engine or 'None detected (optional for Container MAS)'}")
+
+    # 4. Node Connectivity Check
+    url = args.url
+    node_ok = False
+    node_status = None
+    with _get_client(args) as client:
+        try:
+            resp = client.get(f"{url}/api/status")
+            if resp.status_code == 200:
+                node_ok = True
+                node_status = resp.json()
+        except Exception:
+            # Fallback attempt to alternate port if using default
+            if "7077" in url:
+                alt_url = url.replace("7077", "7087").replace("http://", "https://")
+                try:
+                    resp = client.get(f"{alt_url}/api/status")
+                    if resp.status_code == 200:
+                        node_ok = True
+                        url = alt_url
+                        node_status = resp.json()
+                except Exception:
+                    pass
+
+    if node_ok and node_status:
+        print(f"[OK] AuraGrid Node: Running at {url} (NodeId: {node_status.get('nodeId')}, Active MAS: {node_status.get('activeMasCount')})")
+    else:
+        print(f"[INFO] AuraGrid Node: Not responding at {url}. (Launch with 'dotnet run --project src/AuraGrid.Node')")
+
+    # 5. Layer 0 Cache Check
+    layer0_paths = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "AuraGrid", "layer0"),
+        os.path.expanduser("~/.local/share/AuraGrid/layer0"),
+    ]
+    layer0_found = any(os.path.exists(p) for p in layer0_paths)
+    print(f"[{'OK' if layer0_found else 'INFO'}] Layer 0 Asset Cache: {'Available' if layer0_found else 'Will be fetched automatically on first Node launch'}")
+    print("=" * 60)
+
+
+def _handle_status(args: argparse.Namespace) -> None:
+    """Query and display active node status."""
+    url = args.url
+    with _get_client(args) as client:
+        try:
+            resp = client.get(f"{url}/api/status")
+            if resp.status_code == 200:
+                d = resp.json()
+                print(f"Node ID:             {d.get('nodeId')}")
+                print(f"Active MAS:          {d.get('activeMasCount')}")
+                print(f"Registered Services: {d.get('registeredServices')}")
+                print(f"Deployments:         {d.get('healthyDeployments')} healthy / {d.get('failedDeployments')} failed")
+                print(f"Active Leases:       {d.get('activeLeases')}")
+                print(f"Event Topics:        {d.get('eventTopics')}")
+            else:
+                print(f"Error: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            print(f"Connection failed to {url}: {e}")
+
+
+def _handle_logs(args: argparse.Namespace) -> None:
+    """View and tail live node and MAS logs."""
+    url = args.url
+    endpoint = f"{url}/api/logs/{args.mas_id}" if args.mas_id else f"{url}/api/logs"
+    with _get_client(args) as client:
+        try:
+            resp = client.get(endpoint)
+            if resp.status_code == 200:
+                entries = resp.json()
+                if not entries:
+                    print("No log entries.")
+                    return
+                for entry in entries[-args.count:]:
+                    ts = entry.get("timestamp", "")[:19].replace("T", " ")
+                    lvl = entry.get("level", "INFO")
+                    node = entry.get("nodeId", "-")
+                    msg = entry.get("message", "")
+                    exc = entry.get("exception")
+                    print(f"[{ts}] [{lvl:<4}] [{node}] {msg}")
+                    if exc:
+                        print(f"  {exc}")
+            else:
+                print(f"Error: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            print(f"Failed to fetch logs from {url}: {e}")
+
+
+def _handle_init(args: argparse.Namespace) -> None:
+    """Scaffold a new AuraGrid application."""
+    target_dir = os.path.abspath(args.name)
+    if os.path.exists(target_dir) and os.listdir(target_dir):
+        print(f"Error: Directory '{args.name}' already exists and is not empty.", file=sys.stderr)
+        sys.exit(1)
+
+    os.makedirs(target_dir, exist_ok=True)
+    template = args.template.lower()
+
+    if template == "python":
+        manifest = {
+            "appId": args.name,
+            "name": args.name.replace("-", " ").title(),
+            "version": "1.0.0",
+            "description": f"{args.name} worker service on AuraGrid",
+            "services": [
+                {
+                    "masId": f"{args.name}-mas",
+                    "displayName": f"{args.name} Worker",
+                    "mode": "Distributed",
+                    "runtime": "Python",
+                    "pythonConfig": {
+                        "scriptPath": "app.py",
+                        "arguments": "",
+                        "pythonExecutable": "python"
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3
+                }
+            ]
+        }
+        app_code = """import time
+import sys
+
+print(f"AuraGrid Worker started: {sys.argv[0]}")
+count = 0
+while True:
+    count += 1
+    print(f"[{time.strftime('%X')}] Heartbeat tick #{count}")
+    time.sleep(5)
+"""
+        with open(os.path.join(target_dir, "app.py"), "w", encoding="utf-8") as f:
+            f.write(app_code)
+
+    elif template == "container":
+        manifest = {
+            "appId": args.name,
+            "name": args.name.replace("-", " ").title(),
+            "version": "1.0.0",
+            "description": f"{args.name} container workload on AuraGrid",
+            "services": [
+                {
+                    "masId": f"{args.name}-mas",
+                    "displayName": f"{args.name} Container",
+                    "mode": "Distributed",
+                    "runtime": "Container",
+                    "containerConfig": {
+                        "image": "docker.io/library/alpine:latest",
+                        "command": "sleep",
+                        "args": ["3600"]
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3
+                }
+            ]
+        }
+    elif template == "auracode-agent":
+        manifest = {
+            "appId": args.name,
+            "name": args.name.replace("-", " ").title(),
+            "version": "1.0.0",
+            "description": f"{args.name} autonomous agent on AuraGrid",
+            "services": [
+                {
+                    "masId": f"{args.name}-mas",
+                    "displayName": f"{args.name} Agent",
+                    "mode": "CellSingleton",
+                    "runtime": "Python",
+                    "pythonConfig": {
+                        "scriptPath": "agent.py",
+                        "arguments": "--loop",
+                        "managedVenvName": args.name
+                    },
+                    "remoting": {
+                        "enableGrpc": False,
+                        "enableOpenApi": True
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3
+                }
+            ],
+            "providesContracts": [
+                {
+                    "id": f"{args.name}.agent.v1",
+                    "version": "1.0.0"
+                }
+            ],
+            "dependencies": [
+                {
+                    "contractId": "ai.router.v1",
+                    "version": "0.5.5",
+                    "preferredImplementationAppId": "aurarouter"
+                }
+            ]
+        }
+        agent_code = """import os
+import time
+import httpx
+
+GRID_URL = os.environ.get("AURAGRID_URL", "http://localhost:7077")
+print(f"AuraCode Agent starting on AuraGrid ({GRID_URL})...")
+
+while True:
+    try:
+        with httpx.Client(timeout=3.0) as client:
+            resp = client.get(f"{GRID_URL}/api/services")
+            if resp.status_code == 200:
+                services = resp.json()
+                has_router = any("router" in s.get("serviceName", "").lower() for s in services)
+                status = "Connected to AuraRouter" if has_router else "Awaiting AuraRouter registration"
+                print(f"[{time.strftime('%X')}] Agent heartbeat: {status}")
+    except Exception as e:
+        print(f"[{time.strftime('%X')}] Waiting for AuraGrid node: {e}")
+    time.sleep(5)
+"""
+        with open(os.path.join(target_dir, "agent.py"), "w", encoding="utf-8") as f:
+            f.write(agent_code)
+
+    elif template == "router-worker":
+        manifest = {
+            "appId": args.name,
+            "name": args.name.replace("-", " ").title(),
+            "version": "1.0.0",
+            "description": f"{args.name} inference worker for AuraRouter",
+            "services": [
+                {
+                    "masId": f"{args.name}-worker",
+                    "displayName": f"{args.name} Model Worker",
+                    "mode": "Distributed",
+                    "runtime": "Python",
+                    "pythonConfig": {
+                        "scriptPath": "worker.py",
+                        "managedVenvName": args.name
+                    },
+                    "remoting": {
+                        "enableGrpc": True,
+                        "enableOpenApi": True
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3
+                }
+            ],
+            "providesContracts": [
+                {
+                    "id": "ai.router.worker.v1",
+                    "version": "1.0.0"
+                }
+            ]
+        }
+        worker_code = """import time
+
+print("AuraRouter Worker online and registered with local AuraGrid node.")
+while True:
+    time.sleep(10)
+"""
+        with open(os.path.join(target_dir, "worker.py"), "w", encoding="utf-8") as f:
+            f.write(worker_code)
+
+    else:  # csharp
+        manifest = {
+            "appId": args.name,
+            "name": args.name.replace("-", " ").title(),
+            "version": "1.0.0",
+            "description": f"{args.name} in-process C# MAS on AuraGrid",
+            "services": [
+                {
+                    "masId": f"{args.name}-mas",
+                    "displayName": f"{args.name} C# Service",
+                    "mode": "Distributed",
+                    "runtime": "CSharp",
+                    "csharpConfig": {
+                        "assemblyPath": f"{args.name}.dll",
+                        "typeName": f"{args.name}.WorkerMas"
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3
+                }
+            ]
+        }
+
+    with open(os.path.join(target_dir, "app.manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    readme = f"""# {args.name}
+
+AuraGrid Managed Application Service.
+
+## Build and Package
+Package into a distributable `.agp` bundle:
+```bash
+auragrid pack . -o {args.name}.agp
+```
+
+## Deploy to AuraGrid
+Deploy to your local node:
+```bash
+auragrid apps deploy {args.name}.agp
+```
+
+View live logs:
+```bash
+auragrid logs {args.name}-mas
+```
+"""
+    with open(os.path.join(target_dir, "README.md"), "w", encoding="utf-8") as f:
+        f.write(readme)
+
+    print(f"Created new AuraGrid application '{args.name}' ({template} template) at {target_dir}")
+
+
+def _handle_code(args: argparse.Namespace) -> None:
+    """Launch AuraCode assistant or REPL connected to the active AuraGrid node."""
+    env = os.environ.copy()
+    env["AURAGRID_URL"] = args.url
+    env["AURAGRID_ENDPOINT"] = args.url
+    env["AURACODE_ROUTING_BACKEND"] = "grid"
+
+    router_url = os.environ.get("AURAROUTER_URL")
+    if not router_url:
+        router_url = "http://127.0.0.1:8321"
+        try:
+            with _get_client(args) as client:
+                resp = client.get(f"{args.url}/api/services")
+                if resp.status_code == 200:
+                    services = resp.json()
+                    for svc in services:
+                        svc_id = svc.get("serviceId", "").lower()
+                        contract = svc.get("contractId", "")
+                        if "router" in svc_id or contract == "ai.router.v1":
+                            endpoints = svc.get("endpoints", [])
+                            if endpoints:
+                                router_url = endpoints[0]
+                                break
+        except Exception:
+            pass
+    env["AURAROUTER_URL"] = router_url
+
+    cmd = [sys.executable, "-m", "auracode"] + (args.args or [])
+    print(f"Connecting to AuraGrid at {args.url} (AuraRouter: {router_url}) via AuraCode...")
+    try:
+        subprocess.run(cmd, env=env)
+    except FileNotFoundError:
+        print("Error: 'auracode' module not found in the current Python environment.", file=sys.stderr)
+        print("Install it with: pip install -e ../auracode", file=sys.stderr)
+        sys.exit(1)
+
+
+def _handle_pack(args: argparse.Namespace) -> None:
+    """Package an application folder into a .agp bundle."""
+    src_dir = os.path.abspath(args.directory)
+    manifest_path = os.path.join(src_dir, "app.manifest.json")
+    if not os.path.exists(manifest_path):
+        print(f"Error: app.manifest.json not found in {src_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    app_id = manifest.get("appId", "app")
+    version = manifest.get("version", "1.0.0")
+    output = args.output or f"{app_id}-{version}.agp"
+
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(src_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, src_dir)
+                if arcname.endswith((".agp", ".git", ".pyc")) or "__pycache__" in arcname:
+                    continue
+                zipf.write(file_path, arcname)
+
+    size_kb = os.path.getsize(output) / 1024.0
+    print(f"Successfully packaged '{app_id}' v{version} into '{output}' ({size_kb:.1f} KB)")
+
+
+def _get_field(data: dict[str, Any] | None, *keys: str, default: Any = None) -> Any:
+    """Retrieve a value from a dictionary trying multiple case-insensitive key names."""
+    if not isinstance(data, dict):
+        return default
+    for k in keys:
+        if k in data:
+            return data[k]
+    lower_map = {k.lower(): v for k, v in data.items()}
+    for k in keys:
+        if k.lower() in lower_map:
+            return lower_map[k.lower()]
+    return default
+
+
+def _handle_validate(args: argparse.Namespace) -> None:
+    """Validate an application manifest or .agp package before deployment."""
+    target = os.path.abspath(args.path)
+    if not os.path.exists(target):
+        print(f"Error: Target path does not exist: {target}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"AuraGrid Application Pre-Flight Validator")
+    print("=" * 65)
+    print(f"Target: {target}")
+
+    manifest_data = None
+    is_archive = target.endswith((".agp", ".zip"))
+    archive = None
+
+    if is_archive:
+        try:
+            archive = zipfile.ZipFile(target, "r")
+            if "app.manifest.json" not in archive.namelist():
+                print("[FAIL] Missing app.manifest.json in package root")
+                sys.exit(1)
+            manifest_content = archive.read("app.manifest.json").decode("utf-8")
+            manifest_data = json.loads(manifest_content)
+        except Exception as e:
+            print(f"[FAIL] Unable to read archive: {e}")
+            sys.exit(1)
+    elif os.path.isdir(target):
+        manifest_path = os.path.join(target, "app.manifest.json")
+        if not os.path.exists(manifest_path):
+            print(f"[FAIL] app.manifest.json not found in directory: {target}")
+            sys.exit(1)
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest_data = json.load(f)
+        except Exception as e:
+            print(f"[FAIL] Failed to parse app.manifest.json: {e}")
+            sys.exit(1)
+    elif os.path.isfile(target) and target.endswith(".json"):
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                manifest_data = json.load(f)
+        except Exception as e:
+            print(f"[FAIL] Failed to parse manifest JSON: {e}")
+            sys.exit(1)
+    else:
+        print(f"Error: Unsupported target '{target}'. Provide a directory or .agp file.", file=sys.stderr)
+        sys.exit(1)
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # 1. Root fields check
+    app_id = _get_field(manifest_data, "appId")
+    if not app_id or not isinstance(app_id, str):
+        errors.append("Missing or invalid 'appId' (must be a non-empty string)")
+    elif not re.match(r"^[a-zA-Z0-9_\-\.]+$", app_id):
+        errors.append(f"Invalid 'appId' format '{app_id}'. Only alphanumeric, '.', '_', '-' allowed.")
+
+    version = _get_field(manifest_data, "version")
+    if not version or not isinstance(version, str):
+        errors.append("Missing or invalid 'version' (must be semver e.g. 1.0.0)")
+
+    name = _get_field(manifest_data, "name")
+    if not name or not isinstance(name, str):
+        warnings.append("Missing recommended 'name' display title")
+
+    services = _get_field(manifest_data, "services", default=[])
+    if not isinstance(services, list) or len(services) == 0:
+        errors.append("At least one service definition is required under 'services'")
+    else:
+        valid_runtimes = {"python", "dotnet", "csharp", "container", "powershell", "node", "native"}
+        valid_modes = {"singleton", "cellsingleton", "distributed", "drafter", "verifier", "replicated", "host", "daemon"}
+        seen_mas_ids = set()
+
+        for idx, svc in enumerate(services):
+            mas_id = _get_field(svc, "masId")
+            if not mas_id:
+                errors.append(f"Service #{idx+1} missing required 'masId'")
+            elif mas_id in seen_mas_ids:
+                errors.append(f"Duplicate masId '{mas_id}' detected in services list")
+            else:
+                seen_mas_ids.add(mas_id)
+
+            runtime = (_get_field(svc, "runtime") or "").lower()
+            if runtime not in valid_runtimes:
+                errors.append(f"Service '{mas_id or idx}' has invalid runtime '{_get_field(svc, 'runtime')}'. Must be one of {valid_runtimes}")
+
+            mode = (_get_field(svc, "mode") or "").lower()
+            if mode not in valid_modes:
+                warnings.append(f"Service '{mas_id or idx}' has unrecognized mode '{_get_field(svc, 'mode')}'. Expected one of {valid_modes}")
+
+            # Validate entrypoints
+            if runtime == "python":
+                py_cfg = _get_field(svc, "pythonConfig", default={})
+                script = _get_field(py_cfg, "scriptPath")
+                if not script:
+                    errors.append(f"Python service '{mas_id}' missing 'pythonConfig.scriptPath'")
+                elif is_archive and archive and script not in archive.namelist():
+                    warnings.append(f"Python script '{script}' not found in archive root")
+                elif not is_archive and os.path.isdir(target) and not os.path.exists(os.path.join(target, script)):
+                    warnings.append(f"Python script '{script}' not found at {os.path.join(target, script)}")
+            elif runtime in ("csharp", "dotnet"):
+                cs_cfg = _get_field(svc, "csharpConfig", default={})
+                asm = _get_field(cs_cfg, "assemblyPath")
+                if not asm:
+                    errors.append(f"C# service '{mas_id}' missing 'csharpConfig.assemblyPath'")
+            elif runtime == "container":
+                cnt_cfg = _get_field(svc, "containerConfig", default={})
+                image = _get_field(cnt_cfg, "image")
+                if not image:
+                    errors.append(f"Container service '{mas_id}' missing 'containerConfig.image'")
+
+    if archive:
+        archive.close()
+
+    for err in errors:
+        print(f"[FAIL] {err}")
+    for warn in warnings:
+        print(f"[WARN] {warn}")
+
+    print("=" * 65)
+    if not errors:
+        print(f"[OK] Application '{app_id}' v{version} manifest is valid!")
+        if not warnings:
+            print("[OK] All entrypoints, service declarations, and properties passed validation.")
+        print("Application is ready to pack or deploy to AuraGrid.")
+    else:
+        print(f"\nValidation failed with {len(errors)} error(s). Please correct the issues above.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _handle_dev(args: argparse.Namespace) -> None:
+    """Start live development mode with auto-reload, file watching, and log streaming."""
+    target_dir = os.path.abspath(args.directory)
+    manifest_path = os.path.join(target_dir, "app.manifest.json")
+    if not os.path.exists(manifest_path):
+        print(f"Error: app.manifest.json not found in {target_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except Exception as e:
+        print(f"Error reading manifest: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    app_id = _get_field(manifest, "appId", default="dev-app")
+    version = _get_field(manifest, "version", default="1.0.0")
+    services = _get_field(manifest, "services", default=[])
+    mas_ids = [_get_field(s, "masId") for s in services if _get_field(s, "masId")]
+    primary_mas = mas_ids[0] if mas_ids else app_id
+    url = args.url
+
+    print("=" * 65)
+    print("           AuraGrid Live Developer Environment")
+    print("=" * 65)
+    print(f"  App ID:     {app_id} (v{version})")
+    print(f"  Directory:  {target_dir}")
+    print(f"  Target URL: {url}")
+    print(f"  MAS ID(s):  {', '.join(mas_ids) if mas_ids else '-'}")
+    print("=" * 65)
+
+    def scan_files() -> dict[str, float]:
+        mtimes: dict[str, float] = {}
+        for root, _, files in os.walk(target_dir):
+            for file in files:
+                rel = os.path.relpath(os.path.join(root, file), target_dir)
+                if (
+                    rel.endswith((".agp", ".tmp", ".pyc", ".git"))
+                    or "__pycache__" in rel
+                    or "bin" in rel.split(os.sep)
+                    or "obj" in rel.split(os.sep)
+                ):
+                    continue
+                full_path = os.path.join(root, file)
+                try:
+                    mtimes[rel] = os.path.getmtime(full_path)
+                except OSError:
+                    pass
+        return mtimes
+
+    def pack_and_upload(client: httpx.Client) -> bool:
+        fd, temp_pkg = tempfile.mkstemp(suffix=".agp")
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(temp_pkg, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for root, _, files in os.walk(target_dir):
+                    for file in files:
+                        full_path = os.path.join(root, file)
+                        rel = os.path.relpath(full_path, target_dir)
+                        if (
+                            rel.endswith((".agp", ".tmp", ".pyc", ".git"))
+                            or "__pycache__" in rel
+                            or "bin" in rel.split(os.sep)
+                            or "obj" in rel.split(os.sep)
+                        ):
+                            continue
+                        zipf.write(full_path, rel)
+            with open(temp_pkg, "rb") as f:
+                resp = client.post(
+                    f"{url}/api/catalog/upload",
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "X-Deploy-Immediately": "true",
+                    },
+                    content=f.read(),
+                )
+            if resp.status_code < 300:
+                return True
+            else:
+                print(f"[Deploy Error {resp.status_code}]: {resp.text}")
+                return False
+        except Exception as e:
+            print(f"[Deploy Exception]: {e}")
+            return False
+        finally:
+            if os.path.exists(temp_pkg):
+                try:
+                    os.remove(temp_pkg)
+                except OSError:
+                    pass
+
+    seen_log_timestamps: set[str] = set()
+
+    def tail_logs(client: httpx.Client) -> None:
+        try:
+            log_url = f"{url}/api/logs/{primary_mas}" if primary_mas else f"{url}/api/logs"
+            resp = client.get(log_url)
+            if resp.status_code == 200:
+                logs = resp.json() or []
+                for entry in logs[-15:]:
+                    ts = entry.get("timestamp", "")
+                    key = f"{ts}-{entry.get('message', '')}"
+                    if key not in seen_log_timestamps:
+                        seen_log_timestamps.add(key)
+                        level = entry.get("level", "Info")
+                        msg = entry.get("message", "")
+                        print(f"[{ts[11:19] if len(ts) >= 19 else ts}] [{level}] {msg}")
+        except Exception:
+            pass
+
+    with _get_client(args) as client:
+        print("--> Performing initial deploy to grid...")
+        if pack_and_upload(client):
+            print(f"[OK] Application '{app_id}' deployed.")
+        else:
+            print("[WARN] Initial deployment had issues, watching for file updates to retry...")
+
+        last_files = scan_files()
+        print(f"\n[AuraGrid Dev] Watching {len(last_files)} files. (Press Ctrl+C to stop)")
+        tail_logs(client)
+
+        try:
+            while True:
+                time.sleep(args.interval)
+                current_files = scan_files()
+                changed = []
+                for f_rel, mtime in current_files.items():
+                    if f_rel not in last_files or last_files[f_rel] != mtime:
+                        changed.append(f_rel)
+                for f_rel in last_files:
+                    if f_rel not in current_files:
+                        changed.append(f"{f_rel} (deleted)")
+
+                if changed:
+                    time.sleep(0.3)  # Debounce rapid filesystem events
+                    current_files = scan_files()
+                    last_files = current_files
+                    print(f"\n--> [{time.strftime('%X')}] Change detected: {', '.join(changed[:3])}{'...' if len(changed) > 3 else ''}")
+                    print("--> Hot-reloading application bundle...")
+                    if pack_and_upload(client):
+                        # Also attempt fast MAS restart if instance is already alive
+                        for m_id in mas_ids:
+                            try:
+                                client.post(f"{url}/api/mas/{m_id}/restart")
+                            except Exception:
+                                pass
+                        print(f"[OK] Hot-reload complete for '{app_id}'.")
+                    time.sleep(0.5)
+                    tail_logs(client)
+                else:
+                    tail_logs(client)
+
+        except KeyboardInterrupt:
+            print("\nExiting AuraGrid dev mode.")
+
+
+def _handle_completion(args: argparse.Namespace) -> None:
+    """Generate shell tab-completion script for PowerShell or Bash."""
+    shell = args.shell.lower()
+    if shell == "powershell":
+        script = """# AuraGrid PowerShell Completion Script
+# Add to your $PROFILE:
+#   Invoke-Expression (& auragrid completion powershell | Out-String)
+
+Register-ArgumentCompleter -Native -CommandName auragrid -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $commands = @(
+        "doctor", "status", "init", "code", "validate", "pack", "dev",
+        "apps", "logs", "generate-descriptor", "pki", "service", "completion"
+    )
+    $appsCommands = @("list", "deploy", "remove", "restart", "stop")
+    $pkiCommands = @("requests", "approve", "generate-root", "anchors", "revoke")
+    $svcCommands = @("call")
+
+    $elements = $commandAst.ToString().Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
+
+    if ($elements.Count -le 1 -or ($elements.Count -eq 2 -and $wordToComplete)) {
+        $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+            [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+        }
+    } elseif ($elements[1] -eq "apps") {
+        $appsCommands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+            [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+        }
+    } elseif ($elements[1] -eq "pki") {
+        $pkiCommands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+            [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+        }
+    } elseif ($elements[1] -eq "service") {
+        $svcCommands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+            [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+        }
+    }
+}
+"""
+        print(script)
+    else:  # bash
+        script = """# AuraGrid Bash Completion Script
+# Source with: eval "$(auragrid completion bash)"
+
+_auragrid_completions() {
+    local cur prev words cword
+    _init_completion || return
+
+    local top_commands="doctor status init code validate pack dev apps logs generate-descriptor pki service completion"
+    local apps_commands="list deploy remove restart stop"
+    local pki_commands="requests approve generate-root anchors revoke"
+
+    if [ "$cword" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$top_commands" -- "$cur") )
+        return 0
+    fi
+
+    case "${words[1]}" in
+        apps)
+            if [ "$cword" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "$apps_commands" -- "$cur") )
+                return 0
+            fi
+            ;;
+        pki)
+            if [ "$cword" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "$pki_commands" -- "$cur") )
+                return 0
+            fi
+            ;;
+    esac
+}
+complete -F _auragrid_completions auragrid
+"""
+        print(script)
+
+
+
+def _handle_apps(args: argparse.Namespace) -> None:
+    """Manage applications and deployments."""
+    url = args.url
+    with _get_client(args) as client:
+        if args.apps_command == "list":
+            deployments = client.get(f"{url}/api/deployments").json() or []
+            catalog = client.get(f"{url}/api/catalog").json() or []
+            print(f"{'APP ID':<30} {'VERSION':<10} {'STATUS':<15} {'NAME'}")
+            print("-" * 75)
+            for d in deployments:
+                cat_match = next((c for c in catalog if c.get("appId") == d.get("appId")), {})
+                name = cat_match.get("name", "-")
+                print(f"{d.get('appId'):<30} {d.get('version'):<10} {d.get('status'):<15} {name}")
+
+        elif args.apps_command == "deploy":
+            path = os.path.abspath(args.path)
+            if not os.path.exists(path):
+                print(f"Error: File not found: {path}", file=sys.stderr)
+                sys.exit(1)
+
+            deploy_now = not args.no_reconcile
+            if path.endswith((".agp", ".zip")):
+                with open(path, "rb") as f:
+                    resp = client.post(
+                        f"{url}/api/catalog/upload",
+                        headers={
+                            "Content-Type": "application/octet-stream",
+                            "X-Deploy-Immediately": "true" if deploy_now else "false",
+                        },
+                        content=f.read(),
+                    )
+            else:
+                with open(path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                resp = client.post(
+                    f"{url}/api/catalog",
+                    json={"manifest": manifest, "deployImmediately": deploy_now},
+                )
+
+            if resp.status_code < 300:
+                print(f"Application deployed successfully: {resp.text}")
+            else:
+                print(f"Deploy error ({resp.status_code}): {resp.text}")
+
+        elif args.apps_command == "remove":
+            resp = client.delete(f"{url}/api/deployments/{args.app_id}")
+            if resp.status_code < 300:
+                print(f"Deployment removed: {args.app_id}")
+            else:
+                print(f"Remove error ({resp.status_code}): {resp.text}")
+
+        elif args.apps_command == "restart":
+            resp = client.post(f"{url}/api/mas/{args.mas_id}/restart")
+            if resp.status_code < 300:
+                print(f"Success: MAS instance '{args.mas_id}' restart triggered.")
+            else:
+                print(f"Error ({resp.status_code}): {resp.text}")
+
+        elif args.apps_command == "stop":
+            resp = client.post(f"{url}/api/mas/{args.mas_id}/stop")
+            if resp.status_code < 300:
+                print(f"Success: MAS instance '{args.mas_id}' stopped.")
+            else:
+                print(f"Error ({resp.status_code}): {resp.text}")
+
+
 def _handle_service(args: argparse.Namespace) -> None:
     """Handle generic service invocation."""
-    url = getattr(args, "url", "https://localhost:8088")
-    client_opts: dict[str, Any] = {"verify": False}
-    if hasattr(args, "cert") and args.cert:
-        client_opts["cert"] = (args.cert, args.key) if args.key else args.cert
-
-    with httpx.Client(**client_opts) as client:
+    url = args.url
+    with _get_client(args) as client:
         if args.svc_command == "call":
             data = json.loads(args.data) if args.data else {}
-            resp = client.post(f"{url}/api/{args.service}/{args.method}", json=data)
+            # Route through the Management API service invoke bridge
+            resp = client.post(f"{url}/api/services/{args.service}/{args.method}/invoke", json=data)
             if resp.status_code < 300:
                 try:
                     print(json.dumps(resp.json(), indent=2))
-                except:
+                except Exception:
                     print(resp.text)
             else:
                 print(f"Error: {resp.status_code} - {resp.text}")
@@ -128,14 +1075,8 @@ def _handle_service(args: argparse.Namespace) -> None:
 
 def _handle_pki(args: argparse.Namespace) -> None:
     """Handle PKI subcommands."""
-    url = getattr(args, "url", "https://localhost:7087")
-    
-    # Setup mTLS client if cert/key provided
-    client_opts: dict[str, Any] = {"verify": False} # Default to skip verify for bootstrap
-    if hasattr(args, "cert") and args.cert:
-        client_opts["cert"] = (args.cert, args.key) if args.key else args.cert
-
-    with httpx.Client(**client_opts) as client:
+    url = args.url
+    with _get_client(args) as client:
         if args.pki_command == "requests":
             resp = client.get(f"{url}/api/pki/requests")
             if resp.status_code == 200:
@@ -152,20 +1093,18 @@ def _handle_pki(args: argparse.Namespace) -> None:
 
         elif args.pki_command == "approve":
             if not os.path.exists(args.ca_key):
-                print(f"Error: CA key file not found: {args.ca_key}")
+                print(f"Error: CA key file not found: {args.ca_key}", file=sys.stderr)
                 sys.exit(1)
 
             password = getpass.getpass("Enter CA Key Password: ")
-            
             with open(args.ca_key, "rb") as f:
                 pfx_b64 = base64.b64encode(f.read()).decode("utf-8")
 
             payload = {
                 "requestId": args.request_id,
                 "caKeyPfxBase64": pfx_b64,
-                "caKeyPassword": password
+                "caKeyPassword": password,
             }
-
             resp = client.post(f"{url}/api/pki/approve", json=payload)
             if resp.status_code == 200:
                 print("Success: Certificate signed and issued.")
@@ -178,7 +1117,7 @@ def _handle_pki(args: argparse.Namespace) -> None:
                 "subject": args.subject,
                 "password": password,
                 "forceSave": args.force_save,
-                "addAsAnchor": True
+                "addAsAnchor": True,
             }
             resp = client.post(f"{url}/api/pki/generate-root", json=payload)
             if resp.status_code == 200:
@@ -194,7 +1133,7 @@ def _handle_pki(args: argparse.Namespace) -> None:
 
         elif args.pki_command == "anchors":
             if args.anchor_command == "add":
-                with open(args.path, "r") as f:
+                with open(args.path, "r", encoding="utf-8") as f:
                     pem = f.read()
                 resp = client.post(f"{url}/api/pki/anchors", json={"certificatePem": pem})
                 if resp.status_code == 200:
@@ -209,17 +1148,8 @@ def _handle_pki(args: argparse.Namespace) -> None:
                     print(f"Error: {resp.status_code} - {resp.text}")
 
         elif args.pki_command == "revoke":
-            # This uses the generic governance endpoint or a specific MAS method
-            # For simplicity, we use the ManagementService SignCertificate pattern
             payload = {"nodeId": args.id, "reason": args.reason}
-            # We don't have a specific REST endpoint for Revoke yet, 
-            # so we'll use the generic service call logic under the hood.
-            # But the user wants everything to be MAS call eventually.
-            
-            # For now, let's assume there is a governance API
             print(f"Revoking {args.id}...")
-            # We'll need a way to call the MAS method
-            rpc_payload = {"key": f"revoke/{args.id}", "value": args.reason}
             resp = client.post(f"{url}/api/governance/revoke-node", json=payload)
             if resp.status_code == 200:
                 print("Success: Node revoked.")
@@ -232,8 +1162,7 @@ def _generate_descriptor(class_path: str, output: str) -> None:
     parts = class_path.rsplit(".", 1)
     if len(parts) != 2:
         print(
-            f"Error: '{class_path}' must be a fully qualified "
-            f"'module.ClassName' path.",
+            f"Error: '{class_path}' must be a fully qualified 'module.ClassName' path.",
             file=sys.stderr,
         )
         sys.exit(1)

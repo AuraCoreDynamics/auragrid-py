@@ -25,7 +25,7 @@ class TestIpcOptions:
 
     def test_base_url(self) -> None:
         opts = IpcOptions(port=8080, token="tok")
-        assert opts.base_url == "http://localhost:8080"
+        assert opts.base_url == "http://127.0.0.1:8080"
 
 
 class TestIpcError:
