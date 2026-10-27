@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import uuid
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -202,9 +203,23 @@ class EmulatedIpcClient:
 
         # 6. Events endpoints
         if norm_path.startswith("/cell/events") or norm_path.startswith("/events"):
+            topic_id = norm_path.split("/")[-1] if "/" in norm_path else "default"
             if method == "POST":
-                self._events.append({"path": norm_path, "payload": json or data})
-                return httpx.Response(200, json={"published": True}, request=req)
+                req_data = json if isinstance(json, dict) else {}
+                b64_payload = req_data.get("payload", "")
+                event_type = req_data.get("eventType")
+                seq = len(self._events) + 1
+                event_dict = {
+                    "eventId": str(uuid.uuid4()),
+                    "topicId": topic_id,
+                    "sequenceNumber": seq,
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "sourceNodeId": self.node_id,
+                    "eventType": event_type,
+                    "payload": b64_payload,
+                }
+                self._events.append(event_dict)
+                return httpx.Response(200, json=event_dict, request=req)
             return httpx.Response(200, json={"events": self._events}, request=req)
 
         # Fallback default response

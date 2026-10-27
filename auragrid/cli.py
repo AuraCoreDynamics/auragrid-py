@@ -1240,11 +1240,27 @@ def _validate_target(target: str) -> tuple[bool, list[str], list[str], dict[str,
             else:
                 seen_mas_ids.add(mas_id)
 
-            runtime = (_get_field(svc, "runtime") or "").lower()
+            raw_runtime = _get_field(svc, "runtime")
+            if isinstance(raw_runtime, int):
+                runtime_map = {0: "csharp", 1: "powershell", 2: "python", 3: "container", 4: "native"}
+                runtime = runtime_map.get(raw_runtime, str(raw_runtime)).lower()
+            elif raw_runtime is not None:
+                runtime = str(raw_runtime).lower()
+            else:
+                runtime = ""
+
             if runtime not in valid_runtimes:
                 errors.append(f"Service '{mas_id or idx}' has invalid runtime '{_get_field(svc, 'runtime')}'. Must be one of {valid_runtimes}")
 
-            mode = (_get_field(svc, "mode") or "").lower()
+            raw_mode = _get_field(svc, "mode")
+            if isinstance(raw_mode, int):
+                mode_map = {0: "distributed", 1: "cellsingleton", 2: "drafter", 3: "verifier"}
+                mode = mode_map.get(raw_mode, str(raw_mode)).lower()
+            elif raw_mode is not None:
+                mode = str(raw_mode).lower()
+            else:
+                mode = ""
+
             if mode not in valid_modes:
                 warnings.append(f"Service '{mas_id or idx}' has unrecognized mode '{_get_field(svc, 'mode')}'. Expected one of {valid_modes}")
 
