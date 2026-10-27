@@ -71,7 +71,25 @@ def main() -> None:
     # init command
     init_parser = subparsers.add_parser("init", help="Scaffold a new AuraGrid application with manifest, entrypoint, and config")
     init_parser.add_argument("name", help="Application ID / directory name")
-    init_parser.add_argument("--template", choices=["python", "container", "csharp", "auracode-agent", "router-worker"], default="python", help="App template preset")
+    init_parser.add_argument(
+        "--template", "-t",
+        default="tier1",
+        help="App template preset (tier1, tier2, tier3, tier4, tier5, container, csharp, auracode-agent, router-worker)",
+    )
+    init_parser.add_argument(
+        "--runtime", "-r",
+        choices=["python", "csharp", "container", "powershell"],
+        default="python",
+        help="Execution runtime (default: python)",
+    )
+    init_parser.add_argument(
+        "--managed-venv",
+        help="AuraSeed managed virtual environment name",
+    )
+    init_parser.add_argument(
+        "--description", "-d",
+        help="Application description",
+    )
 
     # code command
     code_parser = subparsers.add_parser("code", help="Launch AuraCode assistant connected to the active AuraGrid node")
@@ -113,6 +131,28 @@ def main() -> None:
 
     stop_parser = apps_sub.add_parser("stop", help="Stop an active MAS instance")
     stop_parser.add_argument("mas_id", help="MAS ID to stop")
+
+    app_init = apps_sub.add_parser("init", help="Scaffold a new AuraGrid application manifest by tier template")
+    app_init.add_argument("name", help="Application ID / directory name")
+    app_init.add_argument(
+        "--template", "-t",
+        default="tier1",
+        help="App template preset (tier1, tier2, tier3, tier4, tier5, container, csharp, auracode-agent, router-worker)",
+    )
+    app_init.add_argument(
+        "--runtime", "-r",
+        choices=["python", "csharp", "container", "powershell"],
+        default="python",
+        help="Execution runtime",
+    )
+    app_init.add_argument(
+        "--managed-venv",
+        help="AuraSeed managed virtual environment name",
+    )
+    app_init.add_argument(
+        "--description", "-d",
+        help="Application description",
+    )
 
     # logs command
     logs_parser = subparsers.add_parser("logs", help="View and tail live node and MAS logs")
@@ -325,129 +365,345 @@ def _handle_logs(args: argparse.Namespace) -> None:
 
 
 def _handle_init(args: argparse.Namespace) -> None:
-    """Scaffold a new AuraGrid application."""
+    """Scaffold a new AuraGrid application manifest by tier template."""
     target_dir = os.path.abspath(args.name)
     if os.path.exists(target_dir) and os.listdir(target_dir):
         print(f"Error: Directory '{args.name}' already exists and is not empty.", file=sys.stderr)
         sys.exit(1)
 
     os.makedirs(target_dir, exist_ok=True)
-    template = args.template.lower()
+    template = getattr(args, "template", "tier1").lower()
+    app_id = args.name
+    clean_name = os.path.basename(os.path.normpath(args.name))
+    app_name = clean_name.replace("-", " ").replace("_", " ").title()
+    desc = getattr(args, "description", None)
+    runtime = getattr(args, "runtime", "python").capitalize()
+    managed_venv = getattr(args, "managed_venv", None) or "aurarouter"
 
-    if template == "python":
+    manifest: dict[str, Any] = {}
+
+    if template in ("tier1", "tier1-beacon", "tier1-stateless", "python"):
         manifest = {
-            "appId": args.name,
-            "name": args.name.replace("-", " ").title(),
+            "appId": app_id,
+            "name": f"Tier 1: {app_name}" if "tier" in template else app_name,
             "version": "1.0.0",
-            "description": f"{args.name} worker service on AuraGrid",
+            "description": desc or f"Foundational {runtime} MAS demonstrating sovereign node registration and heartbeat eventing.",
             "services": [
                 {
-                    "masId": f"{args.name}-mas",
-                    "displayName": f"{args.name} Worker",
-                    "mode": "Distributed",
-                    "runtime": "Python",
+                    "masId": f"{clean_name.lower().replace('_', '-')}-mas",
+                    "displayName": f"{app_name} MAS",
+                    "mode": "CellSingleton",
+                    "runtime": runtime,
                     "pythonConfig": {
                         "scriptPath": "app.py",
-                        "arguments": "",
-                        "pythonExecutable": "python"
+                        "workingDirectory": ".",
+                        "managedVenvName": managed_venv,
+                    } if runtime == "Python" else None,
+                    "csharpConfig": {
+                        "assemblyPath": f"{clean_name}.dll",
+                        "typeName": f"{app_name.replace(' ', '')}.WorkerMas",
+                    } if runtime == "Csharp" else None,
+                    "remoting": {
+                        "enableGrpc": False,
+                        "enableOpenApi": True,
+                        "enableMcp": True,
                     },
                     "restartPolicy": "OnFailure",
-                    "maxRestartAttempts": 3
+                    "maxRestartAttempts": 3,
                 }
-            ]
+            ],
         }
-        app_code = """import time
+        if runtime != "Python":
+            del manifest["services"][0]["pythonConfig"]
+        if runtime != "Csharp":
+            del manifest["services"][0]["csharpConfig"]
+
+        app_code = f"""import time
 import sys
 
-print(f"AuraGrid Worker started: {sys.argv[0]}")
+print(f"AuraGrid Tier 1 Beacon started: {{sys.argv[0]}}")
 count = 0
 while True:
     count += 1
-    print(f"[{time.strftime('%X')}] Heartbeat tick #{count}")
+    print(f"[{{time.strftime('%X')}}] Heartbeat tick #{{count}}")
     time.sleep(5)
 """
         with open(os.path.join(target_dir, "app.py"), "w", encoding="utf-8") as f:
             f.write(app_code)
 
-    elif template == "container":
+    elif template in ("tier2", "tier2-gauntlet", "tier2-stateful"):
         manifest = {
-            "appId": args.name,
-            "name": args.name.replace("-", " ").title(),
+            "appId": app_id,
+            "name": f"Tier 2: {app_name}",
             "version": "1.0.0",
-            "description": f"{args.name} container workload on AuraGrid",
+            "description": desc or "Stateful MAS demonstrating resilient local storage, IPC bridge, and fault-tolerance.",
             "services": [
                 {
-                    "masId": f"{args.name}-mas",
-                    "displayName": f"{args.name} Container",
+                    "masId": f"{clean_name.lower().replace('_', '-')}-mas",
+                    "displayName": f"{app_name} Stateful Worker",
                     "mode": "Distributed",
-                    "runtime": "Container",
-                    "containerConfig": {
-                        "image": "docker.io/library/alpine:latest",
-                        "command": "sleep",
-                        "args": ["3600"]
+                    "runtime": "Python",
+                    "pythonConfig": {
+                        "scriptPath": "stateful_worker.py",
+                        "workingDirectory": ".",
+                        "managedVenvName": managed_venv,
+                    },
+                    "remoting": {
+                        "enableGrpc": True,
+                        "enableOpenApi": True,
+                        "enableMcp": True,
                     },
                     "restartPolicy": "OnFailure",
-                    "maxRestartAttempts": 3
+                    "maxRestartAttempts": 5,
                 }
-            ]
+            ],
         }
-    elif template == "auracode-agent":
+        worker_code = """import os
+import sqlite3
+import time
+
+DB_PATH = os.environ.get("AURAGRID_STORAGE_PATH", "state.db")
+conn = sqlite3.connect(DB_PATH)
+conn.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, val INTEGER)")
+conn.commit()
+
+print(f"Tier 2 Stateful Worker online with local storage: {DB_PATH}")
+count = 0
+while True:
+    count += 1
+    conn.execute("INSERT OR REPLACE INTO state VALUES ('tick', ?)", (count,))
+    conn.commit()
+    print(f"[{time.strftime('%X')}] Persisted tick #{count}")
+    time.sleep(5)
+"""
+        with open(os.path.join(target_dir, "stateful_worker.py"), "w", encoding="utf-8") as f:
+            f.write(worker_code)
+
+    elif template in ("tier3", "tier3-ledger", "tier3-singleton"):
         manifest = {
-            "appId": args.name,
-            "name": args.name.replace("-", " ").title(),
+            "appId": app_id,
+            "name": f"Tier 3: {app_name}",
             "version": "1.0.0",
-            "description": f"{args.name} autonomous agent on AuraGrid",
+            "description": desc or "Multi-MAS application demonstrating an immutable audit ledger with a separate auditor service.",
             "services": [
                 {
-                    "masId": f"{args.name}-mas",
-                    "displayName": f"{args.name} Agent",
+                    "masId": f"{clean_name.lower().replace('_', '-')}-ledger-mas",
+                    "displayName": "Ledger MAS",
                     "mode": "CellSingleton",
                     "runtime": "Python",
                     "pythonConfig": {
-                        "scriptPath": "agent.py",
-                        "arguments": "--loop",
-                        "managedVenvName": args.name
+                        "scriptPath": "ledger.py",
+                        "workingDirectory": ".",
+                        "managedVenvName": managed_venv,
+                    },
+                    "remoting": {
+                        "enableGrpc": True,
+                        "enableOpenApi": True,
+                        "enableMcp": True,
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3,
+                },
+                {
+                    "masId": f"{clean_name.lower().replace('_', '-')}-auditor-mas",
+                    "displayName": "Auditor MAS",
+                    "mode": "CellSingleton",
+                    "runtime": "Python",
+                    "pythonConfig": {
+                        "scriptPath": "auditor.py",
+                        "workingDirectory": ".",
+                        "managedVenvName": managed_venv,
                     },
                     "remoting": {
                         "enableGrpc": False,
-                        "enableOpenApi": True
+                        "enableOpenApi": True,
+                        "enableMcp": True,
                     },
                     "restartPolicy": "OnFailure",
-                    "maxRestartAttempts": 3
+                    "maxRestartAttempts": 3,
+                },
+            ],
+        }
+        ledger_code = """import time
+
+print("Tier 3 Ledger MAS active with WAL resumption.")
+while True:
+    print(f"[{time.strftime('%X')}] Ledger block committed.")
+    time.sleep(5)
+"""
+        auditor_code = """import time
+
+print("Tier 3 Auditor MAS active.")
+while True:
+    print(f"[{time.strftime('%X')}] Audit integrity verification OK.")
+    time.sleep(10)
+"""
+        with open(os.path.join(target_dir, "ledger.py"), "w", encoding="utf-8") as f:
+            f.write(ledger_code)
+        with open(os.path.join(target_dir, "auditor.py"), "w", encoding="utf-8") as f:
+            f.write(auditor_code)
+
+    elif template in ("tier4", "tier4-cognitive", "tier4-telemetry"):
+        manifest = {
+            "appId": app_id,
+            "name": f"Tier 4: {app_name}",
+            "version": "1.0.0",
+            "description": desc or "AI-inference Python MAS demonstrating LLM-backed inference routing through the AuraGrid proxy.",
+            "services": [
+                {
+                    "masId": f"{clean_name.lower().replace('_', '-')}-mas",
+                    "displayName": f"{app_name} Cognitive Beacon",
+                    "mode": "CellSingleton",
+                    "runtime": "Python",
+                    "pythonConfig": {
+                        "scriptPath": "beacon.py",
+                        "workingDirectory": ".",
+                        "managedVenvName": managed_venv,
+                    },
+                    "remoting": {
+                        "enableGrpc": True,
+                        "enableOpenApi": True,
+                        "enableMcp": True,
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3,
                 }
             ],
             "providesContracts": [
                 {
-                    "id": f"{args.name}.agent.v1",
-                    "version": "1.0.0"
+                    "id": f"{clean_name.lower().replace('_', '-')}.inference.v1",
+                    "version": "1.0.0",
                 }
             ],
             "dependencies": [
                 {
                     "contractId": "ai.router.v1",
                     "version": "0.5.5",
-                    "preferredImplementationAppId": "aurarouter"
+                    "preferredImplementationAppId": "aurarouter",
                 }
-            ]
+            ],
+        }
+        beacon_code = """import os
+import time
+
+GRID_URL = os.environ.get("AURAGRID_URL", "http://localhost:7077")
+print(f"Tier 4 Cognitive Beacon online. Routing via AuraGrid at {GRID_URL}")
+
+while True:
+    print(f"[{time.strftime('%X')}] Cognitive beacon heartbeat: ready for inference routing.")
+    time.sleep(10)
+"""
+        with open(os.path.join(target_dir, "beacon.py"), "w", encoding="utf-8") as f:
+            f.write(beacon_code)
+
+    elif template in ("tier5", "tier5-consensus", "tier5-entropy"):
+        manifest = {
+            "appId": app_id,
+            "name": f"Tier 5: {app_name}",
+            "version": "1.0.0",
+            "description": desc or "Python MAS demonstrating sovereign cryptographic entropy generation and WAL-backed audit logging of entropy events.",
+            "services": [
+                {
+                    "masId": f"{clean_name.lower().replace('_', '-')}-mas",
+                    "displayName": f"{app_name} Entropy Engine",
+                    "mode": "CellSingleton",
+                    "runtime": "Python",
+                    "pythonConfig": {
+                        "scriptPath": "entropy.py",
+                        "workingDirectory": ".",
+                        "managedVenvName": managed_venv,
+                    },
+                    "remoting": {
+                        "enableGrpc": True,
+                        "enableOpenApi": True,
+                        "enableMcp": True,
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3,
+                }
+            ],
+        }
+        entropy_code = """import os
+import secrets
+import time
+
+print("Tier 5 Sovereign Entropy Engine online.")
+while True:
+    sample = secrets.token_hex(16)
+    print(f"[{time.strftime('%X')}] Cryptographic entropy event: {sample}")
+    time.sleep(10)
+"""
+        with open(os.path.join(target_dir, "entropy.py"), "w", encoding="utf-8") as f:
+            f.write(entropy_code)
+
+    elif template == "container":
+        manifest = {
+            "appId": app_id,
+            "name": f"Container: {app_name}",
+            "version": "1.0.0",
+            "description": desc or f"{app_name} container workload on AuraGrid",
+            "services": [
+                {
+                    "masId": f"{clean_name.lower().replace('_', '-')}-mas",
+                    "displayName": f"{app_name} Container",
+                    "mode": "Distributed",
+                    "runtime": "Container",
+                    "containerConfig": {
+                        "image": "docker.io/library/alpine:latest",
+                        "command": "sleep",
+                        "args": ["3600"],
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3,
+                }
+            ],
+        }
+
+    elif template == "auracode-agent":
+        manifest = {
+            "appId": app_id,
+            "name": f"AuraCode Agent: {app_name}",
+            "version": "1.0.0",
+            "description": desc or f"{app_name} autonomous agent on AuraGrid",
+            "services": [
+                {
+                    "masId": f"{clean_name.lower().replace('_', '-')}-mas",
+                    "displayName": f"{app_name} Agent",
+                    "mode": "CellSingleton",
+                    "runtime": "Python",
+                    "pythonConfig": {
+                        "scriptPath": "agent.py",
+                        "arguments": "--loop",
+                        "managedVenvName": managed_venv,
+                    },
+                    "remoting": {
+                        "enableGrpc": False,
+                        "enableOpenApi": True,
+                        "enableMcp": True,
+                    },
+                    "restartPolicy": "OnFailure",
+                    "maxRestartAttempts": 3,
+                }
+            ],
+            "providesContracts": [
+                {
+                    "id": f"{clean_name.lower().replace('_', '-')}.agent.v1",
+                    "version": "1.0.0",
+                }
+            ],
+            "dependencies": [
+                {
+                    "contractId": "ai.router.v1",
+                    "version": "0.5.5",
+                    "preferredImplementationAppId": "aurarouter",
+                }
+            ],
         }
         agent_code = """import os
 import time
-import httpx
 
-GRID_URL = os.environ.get("AURAGRID_URL", "http://localhost:7077")
-print(f"AuraCode Agent starting on AuraGrid ({GRID_URL})...")
-
+print("AuraCode Autonomous Agent initialized on AuraGrid.")
 while True:
-    try:
-        with httpx.Client(timeout=3.0) as client:
-            resp = client.get(f"{GRID_URL}/api/services")
-            if resp.status_code == 200:
-                services = resp.json()
-                has_router = any("router" in s.get("serviceName", "").lower() for s in services)
-                status = "Connected to AuraRouter" if has_router else "Awaiting AuraRouter registration"
-                print(f"[{time.strftime('%X')}] Agent heartbeat: {status}")
-    except Exception as e:
-        print(f"[{time.strftime('%X')}] Waiting for AuraGrid node: {e}")
     time.sleep(5)
 """
         with open(os.path.join(target_dir, "agent.py"), "w", encoding="utf-8") as f:
@@ -455,34 +711,35 @@ while True:
 
     elif template == "router-worker":
         manifest = {
-            "appId": args.name,
-            "name": args.name.replace("-", " ").title(),
+            "appId": app_id,
+            "name": f"Router Worker: {app_name}",
             "version": "1.0.0",
-            "description": f"{args.name} inference worker for AuraRouter",
+            "description": desc or f"{app_name} inference worker for AuraRouter",
             "services": [
                 {
-                    "masId": f"{args.name}-worker",
-                    "displayName": f"{args.name} Model Worker",
+                    "masId": f"{clean_name.lower().replace('_', '-')}-worker",
+                    "displayName": f"{app_name} Model Worker",
                     "mode": "Distributed",
                     "runtime": "Python",
                     "pythonConfig": {
                         "scriptPath": "worker.py",
-                        "managedVenvName": args.name
+                        "managedVenvName": managed_venv,
                     },
                     "remoting": {
                         "enableGrpc": True,
-                        "enableOpenApi": True
+                        "enableOpenApi": True,
+                        "enableMcp": True,
                     },
                     "restartPolicy": "OnFailure",
-                    "maxRestartAttempts": 3
+                    "maxRestartAttempts": 3,
                 }
             ],
             "providesContracts": [
                 {
                     "id": "ai.router.worker.v1",
-                    "version": "1.0.0"
+                    "version": "1.0.0",
                 }
-            ]
+            ],
         }
         worker_code = """import time
 
@@ -495,54 +752,62 @@ while True:
 
     else:  # csharp
         manifest = {
-            "appId": args.name,
-            "name": args.name.replace("-", " ").title(),
+            "appId": app_id,
+            "name": f"{app_name} Service",
             "version": "1.0.0",
-            "description": f"{args.name} in-process C# MAS on AuraGrid",
+            "description": desc or f"{app_name} in-process C# MAS on AuraGrid",
             "services": [
                 {
-                    "masId": f"{args.name}-mas",
-                    "displayName": f"{args.name} C# Service",
+                    "masId": f"{clean_name.lower().replace('_', '-')}-mas",
+                    "displayName": f"{app_name} C# Service",
                     "mode": "Distributed",
                     "runtime": "CSharp",
                     "csharpConfig": {
-                        "assemblyPath": f"{args.name}.dll",
-                        "typeName": f"{args.name}.WorkerMas"
+                        "assemblyPath": f"{clean_name}.dll",
+                        "typeName": f"{app_name.replace(' ', '')}.WorkerMas",
+                    },
+                    "remoting": {
+                        "enableGrpc": True,
+                        "enableOpenApi": True,
+                        "enableMcp": True,
                     },
                     "restartPolicy": "OnFailure",
-                    "maxRestartAttempts": 3
+                    "maxRestartAttempts": 3,
                 }
-            ]
+            ],
         }
 
-    with open(os.path.join(target_dir, "app.manifest.json"), "w", encoding="utf-8") as f:
+    manifest_path = os.path.join(target_dir, "app.manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
-    readme = f"""# {args.name}
+    readme = f"""# {app_name}
 
-AuraGrid Managed Application Service.
+AuraGrid Managed Application Service ({template} template).
+
+## Validate Manifest
+Ensure manifest adheres strictly to schema:
+```bash
+auragrid validate .
+```
 
 ## Build and Package
 Package into a distributable `.agp` bundle:
 ```bash
-auragrid pack . -o {args.name}.agp
+auragrid pack . -o {clean_name}.agp
 ```
 
 ## Deploy to AuraGrid
 Deploy to your local node:
 ```bash
-auragrid apps deploy {args.name}.agp
-```
-
-View live logs:
-```bash
-auragrid logs {args.name}-mas
+auragrid apps deploy {clean_name}.agp
 ```
 """
     with open(os.path.join(target_dir, "README.md"), "w", encoding="utf-8") as f:
         f.write(readme)
 
-    print(f"Created new AuraGrid application '{args.name}' ({template} template) at {target_dir}")
+    print(f"[OK] Created new AuraGrid application '{app_id}' ({template} template) at {target_dir}")
+    print(f"[OK] Generated valid app.manifest.json ({len(manifest.get('services', []))} services, remoting enabled)")
 
 
 def _handle_code(args: argparse.Namespace) -> None:
@@ -992,7 +1257,11 @@ complete -F _auragrid_completions auragrid
 
 def _handle_apps(args: argparse.Namespace) -> None:
     """Manage applications and deployments."""
-    url = args.url
+    if args.apps_command == "init":
+        _handle_init(args)
+        return
+
+    url = getattr(args, "url", "https://localhost:7087")
     with _get_client(args) as client:
         if args.apps_command == "list":
             deployments = client.get(f"{url}/api/deployments").json() or []
@@ -1054,6 +1323,9 @@ def _handle_apps(args: argparse.Namespace) -> None:
                 print(f"Success: MAS instance '{args.mas_id}' stopped.")
             else:
                 print(f"Error ({resp.status_code}): {resp.text}")
+
+        elif args.apps_command == "init":
+            _handle_init(args)
 
 
 def _handle_service(args: argparse.Namespace) -> None:

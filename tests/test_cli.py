@@ -145,3 +145,62 @@ def test_init_scaffolding_auracode_agent(tmp_path) -> None:
     assert manifest["services"][0]["mode"] == "CellSingleton"
     assert manifest["dependencies"][0]["contractId"] == "ai.router.v1"
 
+
+@pytest.mark.parametrize("tier_template,expected_file", [
+    ("tier1", "app.py"),
+    ("tier2", "stateful_worker.py"),
+    ("tier3", "ledger.py"),
+    ("tier4", "beacon.py"),
+    ("tier5", "entropy.py"),
+])
+def test_init_tier_templates_and_validation(tmp_path, monkeypatch, capsys, tier_template, expected_file) -> None:
+    monkeypatch.chdir(tmp_path)
+    app_name = f"test-{tier_template}"
+    args = argparse.Namespace(
+        name=app_name,
+        template=tier_template,
+        managed_venv="aurarouter",
+        description=f"Auto-generated {tier_template} app",
+    )
+    _handle_init(args)
+
+    app_dir = tmp_path / app_name
+    assert os.path.exists(app_dir / "app.manifest.json")
+    assert os.path.exists(app_dir / expected_file)
+
+    with open(app_dir / "app.manifest.json", "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    assert manifest["appId"] == app_name
+    assert len(manifest["services"]) >= 1
+    remoting = manifest["services"][0]["remoting"]
+    assert remoting["enableMcp"] is True
+
+    # Validate with _handle_validate pre-flight validator
+    val_args = argparse.Namespace(path=str(app_dir))
+    _handle_validate(val_args)
+    out = capsys.readouterr().out
+    assert "manifest is valid!" in out
+
+
+def test_apps_init_dispatch(tmp_path, monkeypatch, capsys) -> None:
+    from auragrid.cli import _handle_apps
+
+    monkeypatch.chdir(tmp_path)
+    app_name = "apps-init-demo"
+    args = argparse.Namespace(
+        apps_command="init",
+        name=app_name,
+        template="tier4",
+        runtime="Python",
+        managed_venv="aurarouter",
+        description="Cognitive inference microservice",
+    )
+    _handle_apps(args)
+
+    app_dir = tmp_path / app_name
+    assert os.path.exists(app_dir / "app.manifest.json")
+    assert os.path.exists(app_dir / "beacon.py")
+
+
+
