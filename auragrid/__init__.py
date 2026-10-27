@@ -7,6 +7,8 @@ from .decorators import auragrid_method, auragrid_service
 from .descriptor import generate_descriptor, save_descriptor
 from .event_client import AsyncEventClient, EventClient
 from .event_models import AuraEventDto, ConsumeResponse, PublishRequest, WalMarkerDto
+from .emulation import AsyncEmulatedIpcClient, EmulatedIpcClient
+from .cli import build_agp_package, load_env_file, resolve_env_vars
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .grid_context import AsyncGridContext, GridContext
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
@@ -75,6 +77,12 @@ __all__ = [
     # Grid context
     "GridContext",
     "AsyncGridContext",
+    "EmulatedIpcClient",
+    "AsyncEmulatedIpcClient",
+    # Packaging & Environment
+    "build_agp_package",
+    "load_env_file",
+    "resolve_env_vars",
     # Lease
     "LeaseClient",
     "AsyncLeaseClient",

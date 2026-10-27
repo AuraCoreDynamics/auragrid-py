@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import hashlib
 import importlib
 import json
 import os
@@ -70,7 +71,12 @@ def main() -> None:
 
     # init command
     init_parser = subparsers.add_parser("init", help="Scaffold a new AuraGrid application with manifest, entrypoint, and config")
-    init_parser.add_argument("name", help="Application ID / directory name")
+    init_parser.add_argument("name", nargs="?", default=None, help="Application ID / directory name (omit for interactive wizard)")
+    init_parser.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="Launch interactive scaffolding wizard",
+    )
     init_parser.add_argument(
         "--template", "-t",
         default="tier1",
@@ -91,6 +97,12 @@ def main() -> None:
         help="Application description",
     )
 
+    # run command (standalone / offline emulation mode)
+    run_parser = subparsers.add_parser("run", help="Run a Python MAS script or app directory in standalone offline emulation mode")
+    run_parser.add_argument("target", nargs="?", default=".", help="Script file (e.g. app.py) or directory containing app.manifest.json")
+    run_parser.add_argument("--env-file", default=".env", help="Path to .env file to load (default: .env)")
+    run_parser.add_argument("args", nargs="*", help="Arguments forwarded to the script")
+
     # code command
     code_parser = subparsers.add_parser("code", help="Launch AuraCode assistant connected to the active AuraGrid node")
     code_parser.add_argument("args", nargs="*", help="Arguments forwarded to auracode")
@@ -103,6 +115,8 @@ def main() -> None:
     pack_parser = subparsers.add_parser("pack", help="Package an application directory with app.manifest.json into a .agp bundle")
     pack_parser.add_argument("directory", default=".", nargs="?", help="Application directory path (default: current directory)")
     pack_parser.add_argument("--output", "-o", help="Target .agp package file path")
+    pack_parser.add_argument("--sign", "-s", help="Path to private key (PEM, DER, or hex) for cryptographic signing")
+    pack_parser.add_argument("--force", "-f", action="store_true", help="Force packaging even if pre-flight validation has errors")
 
     # dev command
     dev_parser = subparsers.add_parser("dev", help="Start live development mode with auto-reload, file watching, and log streaming")
@@ -133,7 +147,12 @@ def main() -> None:
     stop_parser.add_argument("mas_id", help="MAS ID to stop")
 
     app_init = apps_sub.add_parser("init", help="Scaffold a new AuraGrid application manifest by tier template")
-    app_init.add_argument("name", help="Application ID / directory name")
+    app_init.add_argument("name", nargs="?", default=None, help="Application ID / directory name (omit for interactive wizard)")
+    app_init.add_argument(
+        "--interactive", "-i",
+        action="store_true",
+        help="Launch interactive scaffolding wizard",
+    )
     app_init.add_argument(
         "--template", "-t",
         default="tier1",
@@ -224,6 +243,8 @@ def main() -> None:
         _handle_status(args)
     elif args.command == "init":
         _handle_init(args)
+    elif args.command == "run":
+        _handle_run(args)
     elif args.command == "code":
         _handle_code(args)
     elif args.command == "validate":
@@ -366,19 +387,81 @@ def _handle_logs(args: argparse.Namespace) -> None:
 
 def _handle_init(args: argparse.Namespace) -> None:
     """Scaffold a new AuraGrid application manifest by tier template."""
-    target_dir = os.path.abspath(args.name)
-    if os.path.exists(target_dir) and os.listdir(target_dir):
-        print(f"Error: Directory '{args.name}' already exists and is not empty.", file=sys.stderr)
-        sys.exit(1)
+    is_interactive = getattr(args, "interactive", False) or args.name is None
 
-    os.makedirs(target_dir, exist_ok=True)
-    template = getattr(args, "template", "tier1").lower()
     app_id = args.name
-    clean_name = os.path.basename(os.path.normpath(args.name))
-    app_name = clean_name.replace("-", " ").replace("_", " ").title()
+    template = getattr(args, "template", "tier1").lower()
     desc = getattr(args, "description", None)
     runtime = getattr(args, "runtime", "python").capitalize()
     managed_venv = getattr(args, "managed_venv", None) or "aurarouter"
+
+    if is_interactive:
+        if not sys.stdin.isatty() and app_id is None:
+            print("Error: Application name required when running in non-interactive mode. Usage: auragrid init <name>", file=sys.stderr)
+            sys.exit(1)
+
+        print("=" * 65)
+        print("         AuraGrid Application Scaffolding Wizard")
+        print("=" * 65)
+        print("Scaffold a new production-ready AI-native distributed app.\n")
+
+        # 1. Name
+        def_name = app_id or "my-worker"
+        val = input(f"Application ID / Directory [{def_name}]: ").strip()
+        app_id = val or def_name
+
+        # 2. Template
+        print("\nAvailable Templates:")
+        t_opts = [
+            ("tier1", "Tier 1: Sovereign Beacon (Stateless heartbeat & eventing)"),
+            ("tier2", "Tier 2: Stateful Gauntlet (SQLite WAL persistence & IPC bridge)"),
+            ("tier3", "Tier 3: Sovereign Ledger (Distributed immutable ledger & auditor)"),
+            ("tier4", "Tier 4: Cognitive Beacon (LLM-backed inference routing)"),
+            ("tier5", "Tier 5: Entropy Engine (Cryptographic consensus & entropy)"),
+            ("container", "Container Workload (Alpine / OCI container)"),
+            ("auracode-agent", "AuraCode Agent (Autonomous coding agent on AuraGrid)"),
+            ("router-worker", "AuraRouter Worker (Model inference worker for router)"),
+            ("csharp", "C# MAS (.NET 10 in-process service)"),
+        ]
+        for idx, (tk, td) in enumerate(t_opts, 1):
+            mark = " (default)" if tk == template else ""
+            print(f"  {idx}) {td}{mark}")
+        sel = input(f"\nSelect template [1-{len(t_opts)}] (default: {template}): ").strip()
+        if sel.isdigit() and 1 <= int(sel) <= len(t_opts):
+            template = t_opts[int(sel) - 1][0]
+        elif sel:
+            template = sel.lower()
+
+        # 3. Runtime
+        if template == "csharp":
+            runtime = "Csharp"
+        elif template == "container":
+            runtime = "Container"
+        else:
+            r_val = input(f"Execution runtime (python/csharp/container) [default: {runtime.lower()}]: ").strip().lower()
+            if r_val in ("python", "csharp", "container", "powershell"):
+                runtime = r_val.capitalize()
+
+        # 4. Managed Venv
+        if runtime == "Python":
+            mv_val = input(f"AuraSeed managed virtual environment [default: {managed_venv}]: ").strip()
+            if mv_val:
+                managed_venv = mv_val
+
+        # 5. Description
+        desc_val = input("Application description (optional): ").strip()
+        if desc_val:
+            desc = desc_val
+        print()
+
+    target_dir = os.path.abspath(app_id)
+    if os.path.exists(target_dir) and os.listdir(target_dir):
+        print(f"Error: Directory '{app_id}' already exists and is not empty.", file=sys.stderr)
+        sys.exit(1)
+
+    os.makedirs(target_dir, exist_ok=True)
+    clean_name = os.path.basename(os.path.normpath(app_id))
+    app_name = clean_name.replace("-", " ").replace("_", " ").title()
 
     manifest: dict[str, Any] = {}
 
@@ -847,32 +930,186 @@ def _handle_code(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
-def _handle_pack(args: argparse.Namespace) -> None:
-    """Package an application folder into a .agp bundle."""
-    src_dir = os.path.abspath(args.directory)
-    manifest_path = os.path.join(src_dir, "app.manifest.json")
-    if not os.path.exists(manifest_path):
-        print(f"Error: app.manifest.json not found in {src_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        manifest = json.load(f)
-
-    app_id = manifest.get("appId", "app")
-    version = manifest.get("version", "1.0.0")
-    output = args.output or f"{app_id}-{version}.agp"
-
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk(src_dir):
-            for file in files:
-                file_path = os.path.join(root, file)
-                arcname = os.path.relpath(file_path, src_dir)
-                if arcname.endswith((".agp", ".git", ".pyc")) or "__pycache__" in arcname:
+def load_env_file(path: str = ".env") -> dict[str, str]:
+    """Parse a .env file and inject into os.environ if not already set."""
+    env_vars: dict[str, str] = {}
+    if not os.path.exists(path):
+        return env_vars
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
                     continue
-                zipf.write(file_path, arcname)
+                if "=" in line:
+                    key, _, val = line.partition("=")
+                    key = key.strip()
+                    val = val.strip()
+                    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                        val = val[1:-1]
+                    env_vars[key] = val
+                    if key not in os.environ:
+                        os.environ[key] = val
+    except Exception as e:
+        print(f"[WARN] Failed to load {path}: {e}")
+    return env_vars
 
-    size_kb = os.path.getsize(output) / 1024.0
-    print(f"Successfully packaged '{app_id}' v{version} into '{output}' ({size_kb:.1f} KB)")
+
+def resolve_env_vars(val: Any) -> Any:
+    """Recursively expand ${env:NAME:-default} or ${NAME} in string, list, or dict."""
+    if isinstance(val, str):
+        def repl(match: re.Match) -> str:
+            expr = match.group(1).strip()
+            if expr.startswith("env:"):
+                expr = expr[4:]
+            var_name, sep, default_val = expr.partition(":-")
+            if not sep:
+                var_name, sep, default_val = expr.partition(":")
+            return os.environ.get(var_name.strip(), default_val if sep else match.group(0))
+
+        return re.sub(r"\$\{([^}]+)\}", repl, val)
+    elif isinstance(val, dict):
+        return {k: resolve_env_vars(v) for k, v in val.items()}
+    elif isinstance(val, list):
+        return [resolve_env_vars(item) for item in val]
+    return val
+
+
+def _sign_checksums(checksums_bytes: bytes, key_path: str) -> bytes:
+    """Sign checksums.sha256 bytes with an RSA or ECDSA private key."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa, ec, ed25519, utils
+
+    with open(key_path, "rb") as f:
+        raw_key = f.read()
+
+    private_key = None
+    # 1. Try PEM
+    try:
+        private_key = serialization.load_pem_private_key(raw_key, password=None)
+    except Exception:
+        pass
+
+    # 2. Try Hex-encoded DER
+    if private_key is None:
+        try:
+            text = raw_key.decode("utf-8").strip()
+            der_bytes = bytes.fromhex(text)
+            private_key = serialization.load_der_private_key(der_bytes, password=None)
+        except Exception:
+            pass
+
+    # 3. Try raw DER
+    if private_key is None:
+        try:
+            private_key = serialization.load_der_private_key(raw_key, password=None)
+        except Exception:
+            pass
+
+    if private_key is None:
+        raise ValueError(f"Unsupported private key format in '{key_path}'. Expected PEM, DER, or hex PKCS#8/PKCS#1.")
+
+    if isinstance(private_key, rsa.RSAPrivateKey):
+        return private_key.sign(
+            checksums_bytes,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+    elif isinstance(private_key, ec.EllipticCurvePrivateKey):
+        asn1_sig = private_key.sign(checksums_bytes, ec.ECDSA(hashes.SHA256()))
+        r, s = utils.decode_dss_signature(asn1_sig)
+        byte_len = (private_key.curve.key_size + 7) // 8
+        return r.to_bytes(byte_len, "big") + s.to_bytes(byte_len, "big")
+    elif isinstance(private_key, ed25519.Ed25519PrivateKey):
+        return private_key.sign(checksums_bytes)
+    else:
+        raise ValueError(f"Unsupported key type: {type(private_key).__name__}")
+
+
+def build_agp_package(
+    src_dir: str,
+    output_path: str,
+    sign_key_path: str | None = None,
+) -> tuple[int, int]:
+    """Package an application folder into a .agp bundle with SHA-256 checksums and secret exclusion.
+
+    Returns:
+        tuple[int, int]: (files_packaged_count, sensitive_files_excluded_count)
+    """
+    sensitive_patterns = [
+        re.compile(r"^\.env(\..+)?$", re.IGNORECASE),
+        re.compile(r"^.*\.(pem|pfx|key|cer|crt)$", re.IGNORECASE),
+        re.compile(r"^.*(credentials|secret|token).*\.json$", re.IGNORECASE),
+        re.compile(r"^.*\.(agp|zip|tar|gz|bak)$", re.IGNORECASE),
+        re.compile(r"^(\.git|\.github|\.vscode|\.idea|\.pytest_cache|__pycache__|bin|obj)(\/|\\|$)", re.IGNORECASE),
+        re.compile(r"^.*\.(pyc|pyo|tmp)$", re.IGNORECASE),
+    ]
+
+    def is_sensitive(relpath: str) -> bool:
+        normalized = relpath.replace("\\", "/")
+        parts = normalized.split("/")
+        if any(p in (".git", "__pycache__", "bin", "obj", ".vscode", ".idea", ".pytest_cache") for p in parts):
+            return True
+        filename = parts[-1]
+        for pat in sensitive_patterns:
+            if pat.search(filename) or pat.search(normalized):
+                return True
+        return False
+
+    files_to_pack: list[tuple[str, str]] = []
+    checksums: dict[str, str] = {}
+    excluded_count = 0
+
+    for root, _, files in os.walk(src_dir):
+        for file in files:
+            full_path = os.path.join(root, file)
+            relpath = os.path.relpath(full_path, src_dir).replace("\\", "/")
+
+            if relpath in ("checksums.sha256", "signature.sig", "sbom.cdx.json"):
+                continue
+
+            if is_sensitive(relpath):
+                print(f"[SECURITY] Excluded sensitive file from package bundle: {relpath}")
+                excluded_count += 1
+                continue
+
+            with open(full_path, "rb") as f:
+                data = f.read()
+            file_hash = hashlib.sha256(data).hexdigest().lower()
+            checksums[relpath] = file_hash
+            files_to_pack.append((full_path, relpath))
+
+    # Format checksums: lines of <hash>  <relpath>\n, sorted by relpath
+    sorted_paths = sorted(checksums.keys())
+    checksums_content = "".join(f"{checksums[p]}  {p}\n" for p in sorted_paths)
+    checksums_bytes = checksums_content.encode("utf-8")
+
+    signature_bytes: bytes | None = None
+    if sign_key_path:
+        sign_key_full = os.path.abspath(sign_key_path)
+        if not os.path.exists(sign_key_full):
+            raise FileNotFoundError(f"Signing key file not found: {sign_key_full}")
+        signature_bytes = _sign_checksums(checksums_bytes, sign_key_full)
+
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for full_path, relpath in files_to_pack:
+            zipf.write(full_path, relpath)
+
+        # Embed checksums.sha256 (matches AgpPackageFormat.ChecksumsFileName)
+        zipf.writestr("checksums.sha256", checksums_bytes)
+
+        # Embed signature.sig if signed (matches AgpPackageFormat.SignatureFileName)
+        if signature_bytes:
+            zipf.writestr("signature.sig", signature_bytes)
+
+    return len(files_to_pack), excluded_count
 
 
 def _get_field(data: dict[str, Any] | None, *keys: str, default: Any = None) -> Any:
@@ -889,58 +1126,89 @@ def _get_field(data: dict[str, Any] | None, *keys: str, default: Any = None) -> 
     return default
 
 
-def _handle_validate(args: argparse.Namespace) -> None:
-    """Validate an application manifest or .agp package before deployment."""
-    target = os.path.abspath(args.path)
-    if not os.path.exists(target):
-        print(f"Error: Target path does not exist: {target}", file=sys.stderr)
-        sys.exit(1)
+def _validate_target(target: str) -> tuple[bool, list[str], list[str], dict[str, Any] | None]:
+    """Validate an application manifest or .agp package before deployment.
 
-    print(f"AuraGrid Application Pre-Flight Validator")
-    print("=" * 65)
-    print(f"Target: {target}")
-
-    manifest_data = None
+    Returns:
+        tuple[bool, list[str], list[str], dict[str, Any] | None]:
+            (is_valid, errors, warnings, manifest_data)
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    manifest_data: dict[str, Any] | None = None
     is_archive = target.endswith((".agp", ".zip"))
     archive = None
 
     if is_archive:
         try:
             archive = zipfile.ZipFile(target, "r")
-            if "app.manifest.json" not in archive.namelist():
-                print("[FAIL] Missing app.manifest.json in package root")
-                sys.exit(1)
+            namelist = archive.namelist()
+            if "app.manifest.json" not in namelist:
+                errors.append("Missing app.manifest.json in package root")
+                return False, errors, warnings, None
             manifest_content = archive.read("app.manifest.json").decode("utf-8")
             manifest_data = json.loads(manifest_content)
+
+            # Check checksums.sha256
+            if "checksums.sha256" not in namelist:
+                warnings.append("Missing 'checksums.sha256' manifest in package root (required for secure node deployments)")
+            else:
+                cs_lines = archive.read("checksums.sha256").decode("utf-8").splitlines()
+                for line in cs_lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split("  ", 1)
+                    if len(parts) == 2:
+                        h, p = parts
+                        if p in namelist:
+                            actual_h = hashlib.sha256(archive.read(p)).hexdigest().lower()
+                            if actual_h != h.lower():
+                                errors.append(f"Checksum mismatch for '{p}': expected {h}, got {actual_h}")
+                        else:
+                            errors.append(f"File listed in checksums not found in archive: '{p}'")
         except Exception as e:
-            print(f"[FAIL] Unable to read archive: {e}")
-            sys.exit(1)
+            errors.append(f"Unable to read package archive: {e}")
+            return False, errors, warnings, None
+        finally:
+            if archive:
+                archive.close()
     elif os.path.isdir(target):
         manifest_path = os.path.join(target, "app.manifest.json")
         if not os.path.exists(manifest_path):
-            print(f"[FAIL] app.manifest.json not found in directory: {target}")
-            sys.exit(1)
+            errors.append(f"app.manifest.json not found in directory: {target}")
+            return False, errors, warnings, None
         try:
             with open(manifest_path, "r", encoding="utf-8") as f:
                 manifest_data = json.load(f)
         except Exception as e:
-            print(f"[FAIL] Failed to parse app.manifest.json: {e}")
-            sys.exit(1)
+            errors.append(f"Failed to parse app.manifest.json: {e}")
+            return False, errors, warnings, None
+
+        # Check for sensitive files in directory
+        for root, _, files in os.walk(target):
+            for file in files:
+                rel = os.path.relpath(os.path.join(root, file), target).replace("\\", "/")
+                if rel.startswith((".git", "__pycache__", "bin", "obj", ".vscode", ".idea")):
+                    continue
+                if file.startswith(".env") or file.endswith((".pem", ".pfx", ".key", ".cer", ".crt")):
+                    warnings.append(f"Detected sensitive credential file '{rel}'. Note: It will be excluded automatically from .agp packages.")
     elif os.path.isfile(target) and target.endswith(".json"):
         try:
             with open(target, "r", encoding="utf-8") as f:
                 manifest_data = json.load(f)
         except Exception as e:
-            print(f"[FAIL] Failed to parse manifest JSON: {e}")
-            sys.exit(1)
+            errors.append(f"Failed to parse manifest JSON: {e}")
+            return False, errors, warnings, None
     else:
-        print(f"Error: Unsupported target '{target}'. Provide a directory or .agp file.", file=sys.stderr)
-        sys.exit(1)
+        errors.append(f"Unsupported target '{target}'. Provide a directory or .agp file.")
+        return False, errors, warnings, None
 
-    errors: list[str] = []
-    warnings: list[str] = []
+    if not isinstance(manifest_data, dict):
+        errors.append("Manifest root must be a JSON object")
+        return False, errors, warnings, None
 
-    # 1. Root fields check
+    # Check root fields
     app_id = _get_field(manifest_data, "appId")
     if not app_id or not isinstance(app_id, str):
         errors.append("Missing or invalid 'appId' (must be a non-empty string)")
@@ -980,16 +1248,21 @@ def _handle_validate(args: argparse.Namespace) -> None:
             if mode not in valid_modes:
                 warnings.append(f"Service '{mas_id or idx}' has unrecognized mode '{_get_field(svc, 'mode')}'. Expected one of {valid_modes}")
 
-            # Validate entrypoints
+            # Validate entrypoints & secrets
             if runtime == "python":
                 py_cfg = _get_field(svc, "pythonConfig", default={})
                 script = _get_field(py_cfg, "scriptPath")
                 if not script:
                     errors.append(f"Python service '{mas_id}' missing 'pythonConfig.scriptPath'")
-                elif is_archive and archive and script not in archive.namelist():
-                    warnings.append(f"Python script '{script}' not found in archive root")
                 elif not is_archive and os.path.isdir(target) and not os.path.exists(os.path.join(target, script)):
                     warnings.append(f"Python script '{script}' not found at {os.path.join(target, script)}")
+
+                # Check environment variables
+                env_map = _get_field(py_cfg, "environment", default={})
+                if isinstance(env_map, dict):
+                    for k, v in env_map.items():
+                        if isinstance(v, str) and re.search(r"^(sk-[a-zA-Z0-9_\-]{20,}|ghp_[a-zA-Z0-9]{20,})", v):
+                            warnings.append(f"Service '{mas_id}' environment variable '{k}' appears to contain a hardcoded token. Use '${{env:{k}}}' instead.")
             elif runtime in ("csharp", "dotnet"):
                 cs_cfg = _get_field(svc, "csharpConfig", default={})
                 asm = _get_field(cs_cfg, "assemblyPath")
@@ -1001,8 +1274,59 @@ def _handle_validate(args: argparse.Namespace) -> None:
                 if not image:
                     errors.append(f"Container service '{mas_id}' missing 'containerConfig.image'")
 
-    if archive:
-        archive.close()
+    return len(errors) == 0, errors, warnings, manifest_data
+
+
+def _handle_pack(args: argparse.Namespace) -> None:
+    """Package an application folder into a secure .agp bundle."""
+    src_dir = os.path.abspath(args.directory)
+    manifest_path = os.path.join(src_dir, "app.manifest.json")
+    if not os.path.exists(manifest_path):
+        print(f"Error: app.manifest.json not found in {src_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    # 1. Pre-flight validation
+    force = getattr(args, "force", False)
+    is_valid, errors, warnings, manifest = _validate_target(src_dir)
+    if not is_valid and not force:
+        print("Pre-flight validation failed. Cannot package application bundle:", file=sys.stderr)
+        for err in errors:
+            print(f"  [FAIL] {err}", file=sys.stderr)
+        print("\nFix the errors above or run with --force to override.", file=sys.stderr)
+        sys.exit(1)
+
+    app_id = _get_field(manifest, "appId", default="app")
+    version = _get_field(manifest, "version", default="1.0.0")
+    output = args.output or f"{app_id}-{version}.agp"
+    sign_key = getattr(args, "sign", None)
+
+    try:
+        packed_count, excluded_count = build_agp_package(src_dir, output, sign_key)
+    except Exception as e:
+        print(f"Error packaging bundle: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    size_kb = os.path.getsize(output) / 1024.0
+    print(f"[OK] Successfully packaged '{app_id}' v{version} into '{output}' ({size_kb:.1f} KB, {packed_count} files)")
+    print(f"[OK] Embedded root 'checksums.sha256' manifest ({packed_count} entries)")
+    if sign_key:
+        print(f"[OK] Embedded root 'signature.sig' cryptographic signature ({os.path.basename(sign_key)})")
+    if excluded_count > 0:
+        print(f"[SECURITY] Excluded {excluded_count} sensitive/build file(s) from distribution bundle")
+
+
+def _handle_validate(args: argparse.Namespace) -> None:
+    """Validate an application manifest or .agp package before deployment."""
+    target = os.path.abspath(args.path)
+    if not os.path.exists(target):
+        print(f"Error: Target path does not exist: {target}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"AuraGrid Application Pre-Flight Validator")
+    print("=" * 65)
+    print(f"Target: {target}")
+
+    is_valid, errors, warnings, manifest_data = _validate_target(target)
 
     for err in errors:
         print(f"[FAIL] {err}")
@@ -1010,7 +1334,9 @@ def _handle_validate(args: argparse.Namespace) -> None:
         print(f"[WARN] {warn}")
 
     print("=" * 65)
-    if not errors:
+    app_id = _get_field(manifest_data, "appId", default="unknown")
+    version = _get_field(manifest_data, "version", default="0.0.0")
+    if is_valid:
         print(f"[OK] Application '{app_id}' v{version} manifest is valid!")
         if not warnings:
             print("[OK] All entrypoints, service declarations, and properties passed validation.")
@@ -1018,6 +1344,85 @@ def _handle_validate(args: argparse.Namespace) -> None:
     else:
         print(f"\nValidation failed with {len(errors)} error(s). Please correct the issues above.", file=sys.stderr)
         sys.exit(1)
+
+
+def _handle_run(args: argparse.Namespace) -> None:
+    """Run a Python MAS script or app directory in standalone offline emulation mode."""
+    target = os.path.abspath(args.target)
+    script_path = None
+    work_dir = None
+    manifest_env: dict[str, Any] = {}
+
+    if os.path.isdir(target):
+        manifest_path = os.path.join(target, "app.manifest.json")
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                services = _get_field(manifest, "services", default=[])
+                if services:
+                    py_cfg = _get_field(services[0], "pythonConfig", default={})
+                    rel_script = _get_field(py_cfg, "scriptPath")
+                    if rel_script:
+                        script_path = os.path.join(target, rel_script)
+                        work_dir = os.path.join(target, _get_field(py_cfg, "workingDirectory", default="."))
+                    manifest_env = _get_field(py_cfg, "environment", default={})
+            except Exception as e:
+                print(f"Error reading manifest in {target}: {e}", file=sys.stderr)
+                sys.exit(1)
+        if not script_path:
+            for cand in ["app.py", "main.py", "worker.py", "beacon.py"]:
+                p = os.path.join(target, cand)
+                if os.path.exists(p):
+                    script_path = p
+                    work_dir = target
+                    break
+    elif os.path.isfile(target):
+        script_path = target
+        work_dir = os.path.dirname(target)
+    else:
+        print(f"Error: Target '{target}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    if not script_path or not os.path.exists(script_path):
+        print(f"Error: Could not determine Python script entrypoint in '{target}'.", file=sys.stderr)
+        sys.exit(1)
+
+    env_file = getattr(args, "env_file", ".env")
+    env_path = os.path.join(work_dir or os.getcwd(), env_file) if not os.path.isabs(env_file) else env_file
+    loaded_env = load_env_file(env_path)
+
+    env = os.environ.copy()
+    env["AURAGRID_EMULATION_MODE"] = "1"
+    env["AURAGRID_STORAGE_PATH"] = env.get(
+        "AURAGRID_STORAGE_PATH",
+        os.path.join(work_dir or os.getcwd(), "emulated_storage"),
+    )
+
+    resolved_manifest_env = resolve_env_vars(manifest_env)
+    if isinstance(resolved_manifest_env, dict):
+        for k, v in resolved_manifest_env.items():
+            env[str(k)] = str(v)
+
+    print("=" * 65)
+    print("      AuraGrid Standalone / Offline Emulation Runner")
+    print("=" * 65)
+    print(f"  Entrypoint:  {script_path}")
+    print(f"  Directory:   {work_dir or os.getcwd()}")
+    print(f"  Emulation:   AURAGRID_EMULATION_MODE=1 (in-memory cell, zero daemon)")
+    if loaded_env:
+        print(f"  Environment: Loaded {len(loaded_env)} variables from {env_file}")
+    if resolved_manifest_env:
+        print(f"  Manifest:    Injected {len(resolved_manifest_env)} service environment variables")
+    print("=" * 65)
+    print(f"[RUN] Starting process: {sys.executable} {os.path.basename(script_path)}...\n")
+
+    cmd = [sys.executable, script_path] + (args.args or [])
+    try:
+        proc = subprocess.run(cmd, cwd=work_dir, env=env)
+        sys.exit(proc.returncode)
+    except KeyboardInterrupt:
+        print("\n[INFO] Emulation runner stopped by user.")
 
 
 def _handle_dev(args: argparse.Namespace) -> None:
@@ -1074,19 +1479,7 @@ def _handle_dev(args: argparse.Namespace) -> None:
         fd, temp_pkg = tempfile.mkstemp(suffix=".agp")
         os.close(fd)
         try:
-            with zipfile.ZipFile(temp_pkg, "w", zipfile.ZIP_DEFLATED) as zipf:
-                for root, _, files in os.walk(target_dir):
-                    for file in files:
-                        full_path = os.path.join(root, file)
-                        rel = os.path.relpath(full_path, target_dir)
-                        if (
-                            rel.endswith((".agp", ".tmp", ".pyc", ".git"))
-                            or "__pycache__" in rel
-                            or "bin" in rel.split(os.sep)
-                            or "obj" in rel.split(os.sep)
-                        ):
-                            continue
-                        zipf.write(full_path, rel)
+            build_agp_package(target_dir, temp_pkg)
             with open(temp_pkg, "rb") as f:
                 resp = client.post(
                     f"{url}/api/catalog/upload",

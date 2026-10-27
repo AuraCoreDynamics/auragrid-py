@@ -203,4 +203,142 @@ def test_apps_init_dispatch(tmp_path, monkeypatch, capsys) -> None:
     assert os.path.exists(app_dir / "beacon.py")
 
 
+def test_pack_checksums_and_sensitive_exclusion(tmp_path, capsys) -> None:
+    app_dir = tmp_path / "secure-app"
+    os.makedirs(app_dir, exist_ok=True)
+    manifest = {
+        "appId": "secure-app",
+        "name": "Secure App",
+        "version": "1.0.0",
+        "services": [
+            {
+                "masId": "secure-mas",
+                "mode": "Distributed",
+                "runtime": "Python",
+                "pythonConfig": {"scriptPath": "main.py"}
+            }
+        ]
+    }
+    with open(app_dir / "app.manifest.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+    with open(app_dir / "main.py", "w", encoding="utf-8") as f:
+        f.write("print('secure')\n")
+    # Sensitive files that MUST be excluded
+    with open(app_dir / ".env", "w", encoding="utf-8") as f:
+        f.write("API_KEY=super-secret\n")
+    with open(app_dir / "private.key", "w", encoding="utf-8") as f:
+        f.write("KEY_DATA\n")
+    with open(app_dir / "cert.pem", "w", encoding="utf-8") as f:
+        f.write("PEM_DATA\n")
+
+    pkg_path = tmp_path / "secure-app.agp"
+    args = argparse.Namespace(directory=str(app_dir), output=str(pkg_path), sign=None, force=False)
+    _handle_pack(args)
+
+    out = capsys.readouterr().out
+    assert "[SECURITY] Excluded sensitive file from package bundle: .env" in out
+    assert "[SECURITY] Excluded sensitive file from package bundle: private.key" in out
+    assert "[SECURITY] Excluded sensitive file from package bundle: cert.pem" in out
+
+    # Check zip contents
+    with zipfile.ZipFile(pkg_path, "r") as z:
+        names = z.namelist()
+        assert "app.manifest.json" in names
+        assert "main.py" in names
+        assert ".env" not in names
+        assert "private.key" not in names
+        assert "cert.pem" not in names
+        assert "checksums.sha256" in names
+
+        # Verify checksums content
+        cs_content = z.read("checksums.sha256").decode("utf-8")
+        assert "app.manifest.json" in cs_content
+        assert "main.py" in cs_content
+        assert ".env" not in cs_content
+
+
+def test_pack_with_rsa_signature(tmp_path) -> None:
+    from cryptography.hazmat.primitives.asymmetric import rsa, padding
+    from cryptography.hazmat.primitives import hashes, serialization
+
+    # Generate RSA-2048 key pair
+    private_key = rsa.generate_private_key(65537, 2048)
+    key_file = tmp_path / "signing_key.pem"
+    with open(key_file, "wb") as f:
+        f.write(
+            private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+
+    app_dir = tmp_path / "signed-app"
+    os.makedirs(app_dir, exist_ok=True)
+    manifest = {
+        "appId": "signed-app",
+        "name": "Signed App",
+        "version": "1.0.0",
+        "services": [
+            {
+                "masId": "signed-mas",
+                "mode": "Distributed",
+                "runtime": "Python",
+                "pythonConfig": {"scriptPath": "main.py"}
+            }
+        ]
+    }
+    with open(app_dir / "app.manifest.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+    with open(app_dir / "main.py", "w", encoding="utf-8") as f:
+        f.write("print('signed')\n")
+
+    pkg_path = tmp_path / "signed-app.agp"
+    args = argparse.Namespace(directory=str(app_dir), output=str(pkg_path), sign=str(key_file), force=False)
+    _handle_pack(args)
+
+    with zipfile.ZipFile(pkg_path, "r") as z:
+        assert "signature.sig" in z.namelist()
+        sig_bytes = z.read("signature.sig")
+        cs_bytes = z.read("checksums.sha256")
+
+        # Verify signature with public key using RSA-PSS SHA256
+        public_key = private_key.public_key()
+        public_key.verify(
+            sig_bytes,
+            cs_bytes,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+
+
+def test_env_resolution_and_loader(tmp_path, monkeypatch) -> None:
+    from auragrid.cli import load_env_file, resolve_env_vars
+
+    env_path = tmp_path / ".env"
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write("CUSTOM_GRID_PORT=9099\n")
+        f.write("SECRET_TOKEN='my-secret-val'\n")
+
+    monkeypatch.delenv("CUSTOM_GRID_PORT", raising=False)
+    monkeypatch.delenv("SECRET_TOKEN", raising=False)
+
+    loaded = load_env_file(str(env_path))
+    assert loaded["CUSTOM_GRID_PORT"] == "9099"
+    assert loaded["SECRET_TOKEN"] == "my-secret-val"
+    assert os.environ["CUSTOM_GRID_PORT"] == "9099"
+
+    # Test variable expansion
+    expanded = resolve_env_vars({
+        "url": "http://localhost:${env:CUSTOM_GRID_PORT}",
+        "fallback": "${env:NON_EXISTENT_VAR:-fallback_value}",
+    })
+    assert expanded["url"] == "http://localhost:9099"
+    assert expanded["fallback"] == "fallback_value"
+
+
+
 

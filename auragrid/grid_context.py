@@ -64,9 +64,20 @@ class GridContext:
         self,
         options: Optional[IpcOptions] = None,
         service_instances: Optional[list[object]] = None,
+        standalone: Optional[bool] = None,
     ) -> None:
+        self._standalone = (
+            standalone
+            if standalone is not None
+            else (os.environ.get("AURAGRID_EMULATION_MODE") in ("1", "true", "yes"))
+        )
         self._options = options or IpcOptions()
-        self._ipc_client = IpcClient(self._options)
+        if self._standalone:
+            from .emulation import EmulatedIpcClient
+
+            self._ipc_client = EmulatedIpcClient()
+        else:
+            self._ipc_client = IpcClient(self._options)
         self._config: Optional[CellConfiguration] = None
         self._membership: Optional[CellMembership] = None
         self._governance: Optional[GovernanceClient] = None
@@ -79,6 +90,11 @@ class GridContext:
 
         if service_instances:
             self._start_service_servers(service_instances)
+
+    @property
+    def is_standalone(self) -> bool:
+        """Whether the context is running in standalone emulation mode."""
+        return self._standalone
 
     def __enter__(self) -> GridContext:
         return self
@@ -244,9 +260,20 @@ class AsyncGridContext:
         self,
         options: Optional[IpcOptions] = None,
         service_instances: Optional[list[object]] = None,
+        standalone: Optional[bool] = None,
     ) -> None:
+        self._standalone = (
+            standalone
+            if standalone is not None
+            else (os.environ.get("AURAGRID_EMULATION_MODE") in ("1", "true", "yes"))
+        )
         self._options = options or IpcOptions()
-        self._ipc_client = AsyncIpcClient(self._options)
+        if self._standalone:
+            from .emulation import AsyncEmulatedIpcClient
+
+            self._ipc_client = AsyncEmulatedIpcClient()
+        else:
+            self._ipc_client = AsyncIpcClient(self._options)
         self._config: Optional[AsyncCellConfiguration] = None
         self._membership: Optional[AsyncCellMembership] = None
         self._governance: Optional[AsyncGovernanceClient] = None
@@ -257,6 +284,11 @@ class AsyncGridContext:
         self._chaos: Optional[AsyncChaosClient] = None
         self._service_servers: list[ServiceServer] = []
         self._pending_instances = service_instances
+
+    @property
+    def is_standalone(self) -> bool:
+        """Whether the context is running in standalone emulation mode."""
+        return self._standalone
 
     async def __aenter__(self) -> AsyncGridContext:
         if self._pending_instances:
