@@ -31,6 +31,7 @@ from typing import Any, Optional
 from .cell_config import AsyncCellConfiguration, CellConfiguration
 from .cell_membership import AsyncCellMembership, CellMembership
 from .chaos_client import AsyncChaosClient, ChaosClient
+from .collaboration import AsyncCollaborationClient, CollaborationClient
 from .event_client import AsyncEventClient, EventClient
 from .governance import AsyncGovernanceClient, GovernanceClient
 from .ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
@@ -84,6 +85,7 @@ class GridContext:
         self._events: Optional[EventClient] = None
         self._storage: Optional[StorageClient] = None
         self._lease: Optional[LeaseClient] = None
+        self._collaboration: Optional[CollaborationClient] = None
         self._registry: Optional[RegistryClient] = None
         self._chaos: Optional[ChaosClient] = None
         self._service_servers: list[ServiceServer] = []
@@ -157,6 +159,13 @@ class GridContext:
         if self._lease is None:
             self._lease = LeaseClient(self._ipc_client)
         return self._lease
+
+    @property
+    def collaboration(self) -> CollaborationClient:
+        """User-space collaboration and deconfliction client."""
+        if self._collaboration is None:
+            self._collaboration = CollaborationClient(self._ipc_client)
+        return self._collaboration
 
     @property
     def registry(self) -> RegistryClient:
@@ -280,6 +289,7 @@ class AsyncGridContext:
         self._events: Optional[AsyncEventClient] = None
         self._storage: Optional[AsyncStorageClient] = None
         self._lease: Optional[AsyncLeaseClient] = None
+        self._collaboration: Optional[AsyncCollaborationClient] = None
         self._registry: Optional[AsyncRegistryClient] = None
         self._chaos: Optional[AsyncChaosClient] = None
         self._service_servers: list[ServiceServer] = []
@@ -354,6 +364,13 @@ class AsyncGridContext:
         if self._lease is None:
             self._lease = AsyncLeaseClient(self._ipc_client)
         return self._lease
+
+    @property
+    def collaboration(self) -> AsyncCollaborationClient:
+        """User-space collaboration and deconfliction client (async)."""
+        if self._collaboration is None:
+            self._collaboration = AsyncCollaborationClient(self._ipc_client)
+        return self._collaboration
 
     @property
     def registry(self) -> AsyncRegistryClient:

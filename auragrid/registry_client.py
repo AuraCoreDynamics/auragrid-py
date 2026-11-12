@@ -32,7 +32,7 @@ class ServiceEndpoint:
             service_id=data["serviceId"],
             service_name=data["serviceName"],
             node_id=data["nodeId"],
-            endpoint_url=data["endpointUrl"],
+            endpoint_url=data.get("endpointUrl") or data.get("grpcEndpoint") or "",
             capabilities=data.get("capabilities", []),
             metadata=data.get("metadata", {})
         )

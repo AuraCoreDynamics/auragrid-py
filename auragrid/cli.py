@@ -39,7 +39,28 @@ import httpx
 
 from .descriptor import save_descriptor
 
-DEFAULT_MGMT_URL = os.environ.get("AURAGRID_URL", "http://localhost:7077")
+DEFAULT_MGMT_URL = os.environ.get("AURAGRID_MANAGEMENT_URL") or os.environ.get("AURAGRID_URL")
+
+
+def _resolve_management_url(args: argparse.Namespace) -> str | None:
+    """Resolve the configured AuraGrid management URL from CLI args or environment."""
+    return (
+        getattr(args, "url", None)
+        or os.environ.get("AURAGRID_MANAGEMENT_URL")
+        or os.environ.get("AURAGRID_URL")
+        or os.environ.get("AURAGRID_LOCAL_URL")
+    )
+
+
+def _require_management_url(args: argparse.Namespace) -> str:
+    """Return the configured AuraGrid management URL or raise an explicit configuration error."""
+    url = _resolve_management_url(args)
+    if not url:
+        raise ValueError(
+            "AuraGrid management URL is not configured. Set AURAGRID_MANAGEMENT_URL "
+            "(or AURAGRID_URL / AURAGRID_LOCAL_URL) or pass --url."
+        )
+    return url.rstrip("/")
 
 
 def _get_client(args: argparse.Namespace) -> httpx.Client:
@@ -301,29 +322,22 @@ def _handle_doctor(args: argparse.Namespace) -> None:
     print(f"[{'OK' if container_engine else 'INFO'}] Container Runtime: {container_engine or 'None detected (optional for Container MAS)'}")
 
     # 4. Node Connectivity Check
-    url = args.url
+    url = _resolve_management_url(args)
     node_ok = False
     node_status = None
-    with _get_client(args) as client:
-        try:
-            resp = client.get(f"{url}/api/status")
-            if resp.status_code == 200:
-                node_ok = True
-                node_status = resp.json()
-        except Exception:
-            # Fallback attempt to alternate port if using default
-            if "7077" in url:
-                alt_url = url.replace("7077", "7087").replace("http://", "https://")
-                try:
-                    resp = client.get(f"{alt_url}/api/status")
-                    if resp.status_code == 200:
-                        node_ok = True
-                        url = alt_url
-                        node_status = resp.json()
-                except Exception:
-                    pass
+    if url:
+        with _get_client(args) as client:
+            try:
+                resp = client.get(f"{url}/api/status")
+                if resp.status_code == 200:
+                    node_ok = True
+                    node_status = resp.json()
+            except Exception as exc:
+                print(f"[WARN] AuraGrid Node probe failed for {url}: {exc}")
 
-    if node_ok and node_status:
+    if not url:
+        print("[INFO] AuraGrid Node URL: Not configured (set AURAGRID_MANAGEMENT_URL / AURAGRID_URL or pass --url)")
+    elif node_ok and node_status:
         print(f"[OK] AuraGrid Node: Running at {url} (NodeId: {node_status.get('nodeId')}, Active MAS: {node_status.get('activeMasCount')})")
     else:
         print(f"[INFO] AuraGrid Node: Not responding at {url}. (Launch with 'dotnet run --project src/AuraGrid.Node')")
@@ -340,7 +354,7 @@ def _handle_doctor(args: argparse.Namespace) -> None:
 
 def _handle_status(args: argparse.Namespace) -> None:
     """Query and display active node status."""
-    url = args.url
+    url = _require_management_url(args)
     with _get_client(args) as client:
         try:
             resp = client.get(f"{url}/api/status")
@@ -360,7 +374,7 @@ def _handle_status(args: argparse.Namespace) -> None:
 
 def _handle_logs(args: argparse.Namespace) -> None:
     """View and tail live node and MAS logs."""
-    url = args.url
+    url = _require_management_url(args)
     endpoint = f"{url}/api/logs/{args.mas_id}" if args.mas_id else f"{url}/api/logs"
     with _get_client(args) as client:
         try:
@@ -669,7 +683,7 @@ while True:
         beacon_code = """import os
 import time
 
-GRID_URL = os.environ.get("AURAGRID_URL", "http://localhost:7077")
+GRID_URL = os.environ.get("AURAGRID_URL") or os.environ.get("AURAGRID_MANAGEMENT_URL") or "<unconfigured>"
 print(f"Tier 4 Cognitive Beacon online. Routing via AuraGrid at {GRID_URL}")
 
 while True:
@@ -895,33 +909,34 @@ auragrid apps deploy {clean_name}.agp
 
 def _handle_code(args: argparse.Namespace) -> None:
     """Launch AuraCode assistant or REPL connected to the active AuraGrid node."""
+    mgmt_url = _require_management_url(args)
     env = os.environ.copy()
-    env["AURAGRID_URL"] = args.url
-    env["AURAGRID_ENDPOINT"] = args.url
+    env["AURAGRID_URL"] = mgmt_url
+    env["AURAGRID_ENDPOINT"] = mgmt_url
     env["AURACODE_ROUTING_BACKEND"] = "grid"
 
     router_url = os.environ.get("AURAROUTER_URL")
     if not router_url:
-        router_url = "http://127.0.0.1:8321"
-        try:
-            with _get_client(args) as client:
-                resp = client.get(f"{args.url}/api/services")
-                if resp.status_code == 200:
-                    services = resp.json()
-                    for svc in services:
-                        svc_id = svc.get("serviceId", "").lower()
-                        contract = svc.get("contractId", "")
-                        if "router" in svc_id or contract == "ai.router.v1":
-                            endpoints = svc.get("endpoints", [])
-                            if endpoints:
-                                router_url = endpoints[0]
-                                break
-        except Exception:
-            pass
+        with _get_client(args) as client:
+            resp = client.get(f"{mgmt_url}/api/services")
+            if resp.status_code == 200:
+                services = resp.json()
+                for svc in services:
+                    svc_id = svc.get("serviceId", "").lower()
+                    contract = svc.get("contractId", "")
+                    if "router" in svc_id or contract == "ai.router.v1":
+                        endpoints = svc.get("endpoints", [])
+                        if endpoints:
+                            router_url = endpoints[0]
+                            break
+    if not router_url:
+        raise RuntimeError(
+            "AuraRouter endpoint is not configured. Set AURAROUTER_URL or register 'ai.router.v1' on the node."
+        )
     env["AURAROUTER_URL"] = router_url
 
     cmd = [sys.executable, "-m", "auracode"] + (args.args or [])
-    print(f"Connecting to AuraGrid at {args.url} (AuraRouter: {router_url}) via AuraCode...")
+    print(f"Connecting to AuraGrid at {mgmt_url} (AuraRouter: {router_url}) via AuraCode...")
     try:
         subprocess.run(cmd, env=env)
     except FileNotFoundError:
@@ -1228,7 +1243,7 @@ def _validate_target(target: str) -> tuple[bool, list[str], list[str], dict[str,
         errors.append("At least one service definition is required under 'services'")
     else:
         valid_runtimes = {"python", "dotnet", "csharp", "container", "powershell", "node", "native"}
-        valid_modes = {"singleton", "cellsingleton", "distributed", "drafter", "verifier", "replicated", "host", "daemon"}
+        valid_modes = {"localonly", "cellsingleton", "distributed"}
         seen_mas_ids = set()
 
         for idx, svc in enumerate(services):
@@ -1254,7 +1269,7 @@ def _validate_target(target: str) -> tuple[bool, list[str], list[str], dict[str,
 
             raw_mode = _get_field(svc, "mode")
             if isinstance(raw_mode, int):
-                mode_map = {0: "distributed", 1: "cellsingleton", 2: "drafter", 3: "verifier"}
+                mode_map = {0: "distributed", 1: "cellsingleton", 2: "localonly"}
                 mode = mode_map.get(raw_mode, str(raw_mode)).lower()
             elif raw_mode is not None:
                 mode = str(raw_mode).lower()
@@ -1461,7 +1476,7 @@ def _handle_dev(args: argparse.Namespace) -> None:
     services = _get_field(manifest, "services", default=[])
     mas_ids = [_get_field(s, "masId") for s in services if _get_field(s, "masId")]
     primary_mas = mas_ids[0] if mas_ids else app_id
-    url = args.url
+    url = _require_management_url(args)
 
     print("=" * 65)
     print("           AuraGrid Live Developer Environment")
@@ -1670,7 +1685,7 @@ def _handle_apps(args: argparse.Namespace) -> None:
         _handle_init(args)
         return
 
-    url = getattr(args, "url", "https://localhost:7087")
+    url = _require_management_url(args)
     with _get_client(args) as client:
         if args.apps_command == "list":
             deployments = client.get(f"{url}/api/deployments").json() or []
@@ -1739,7 +1754,7 @@ def _handle_apps(args: argparse.Namespace) -> None:
 
 def _handle_service(args: argparse.Namespace) -> None:
     """Handle generic service invocation."""
-    url = args.url
+    url = _require_management_url(args)
     with _get_client(args) as client:
         if args.svc_command == "call":
             data = json.loads(args.data) if args.data else {}
@@ -1756,7 +1771,7 @@ def _handle_service(args: argparse.Namespace) -> None:
 
 def _handle_pki(args: argparse.Namespace) -> None:
     """Handle PKI subcommands."""
-    url = args.url
+    url = _require_management_url(args)
     with _get_client(args) as client:
         if args.pki_command == "requests":
             resp = client.get(f"{url}/api/pki/requests")

@@ -86,10 +86,26 @@ _load_tokens_from_stdin()
 class IpcError(Exception):
     """Raised when the IPC bridge returns a non-success status code."""
 
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        message: str = "",
+        payload: Optional[Any] = None,
+    ) -> None:
         self.status_code = status_code
         self.message = message
+        self.payload = payload
         super().__init__(f"IPC error {status_code}: {message}")
+
+
+def _default_ipc_token() -> str:
+    """Resolve IPC authentication token from stdin handshake or environment."""
+    return _stdin_tokens.get("IPC_TOKEN") or os.environ.get("AURAGRID_IPC_TOKEN", "")
+
+
+def _default_fencing_token() -> str | None:
+    """Resolve fencing token from stdin handshake or environment."""
+    return _stdin_tokens.get("FENCING_TOKEN") or os.environ.get("AURAGRID_FENCING_TOKEN") or None
 
 
 @dataclass
@@ -108,8 +124,8 @@ class IpcOptions:
     """
 
     port: int = field(default_factory=lambda: int(os.environ.get("AURAGRID_IPC_PORT", "5100")))
-    token: str = field(default_factory=lambda: _stdin_tokens.get("IPC_TOKEN", ""))
-    fencing_token: str | None = field(default_factory=lambda: _stdin_tokens.get("FENCING_TOKEN"))
+    token: str = field(default_factory=_default_ipc_token)
+    fencing_token: str | None = field(default_factory=_default_fencing_token)
     timeout: float = 5.0
     max_retries: int = 2
     backoff_factor: float = 0.5
@@ -136,18 +152,19 @@ def _build_headers(token: str, fencing_token: str | None = None) -> dict[str, st
 
 def _should_retry(status_code: int) -> bool:
     """Return ``True`` if the status code indicates a retryable server error."""
-    return status_code >= 500
+    return status_code >= 500 and status_code != 501
 
 
 def _raise_for_error(response: httpx.Response) -> None:
     """Raise ``IpcError`` if the response indicates failure."""
     if response.status_code >= 400:
+        body: Optional[Any] = None
         try:
             body = response.json()
-            message = body.get("message", response.text)
+            message = body.get("message", response.text) if isinstance(body, dict) else response.text
         except Exception:
             message = response.text
-        raise IpcError(response.status_code, message)
+        raise IpcError(response.status_code, message, payload=body)
 
 
 class IpcClient:

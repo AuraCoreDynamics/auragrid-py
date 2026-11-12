@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, AsyncIterator, Optional
 
-from .ipc import AsyncIpcClient, IpcClient
+from .ipc import AsyncIpcClient, IpcClient, IpcError
 from .models import CellConfigAllResponse, CellConfigMetadata, CellConfigValueResponse
 
 
@@ -37,7 +37,12 @@ class CellConfiguration:
         Returns:
             The configuration value, or ``None`` if the key does not exist.
         """
-        response = self._client.get(f"/cell/config/{key}")
+        try:
+            response = self._client.get(f"/cell/config/{key}")
+        except IpcError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         result = CellConfigValueResponse.model_validate(response.json())
         return result.value
 
@@ -109,7 +114,12 @@ class AsyncCellConfiguration:
         Returns:
             The configuration value, or ``None`` if the key does not exist.
         """
-        response = await self._client.get(f"/cell/config/{key}")
+        try:
+            response = await self._client.get(f"/cell/config/{key}")
+        except IpcError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         result = CellConfigValueResponse.model_validate(response.json())
         return result.value
 

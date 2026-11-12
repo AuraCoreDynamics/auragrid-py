@@ -14,10 +14,11 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import signal
 import socket
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any, Callable, Optional
 
@@ -167,8 +168,8 @@ class ServiceServer:
         self._service_instance = service_instance
         self._ipc_token = ipc_token
         self._methods = _get_methods(service_instance)
-        self._port = port or _allocate_ephemeral_port()
-        self._server: Optional[HTTPServer] = None
+        self._port = port
+        self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[Thread] = None
 
     @property
@@ -199,7 +200,8 @@ class ServiceServer:
             },
         )
 
-        self._server = HTTPServer(("127.0.0.1", self._port), handler_class)
+        bind_host = os.environ.get("AURAGRID_SERVICE_BIND_HOST", "127.0.0.1")
+        self._server = ThreadingHTTPServer((bind_host, self._port), handler_class)
         self._port = self._server.server_address[1]
 
         self._thread = Thread(target=self._server.serve_forever, daemon=True)

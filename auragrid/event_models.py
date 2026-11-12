@@ -84,5 +84,7 @@ class WalMarkerDto(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     topic_id: str = Field(alias="topicId")
-    sequence_number: int = Field(alias="sequenceNumber")
+    sequence_number: Optional[int] = Field(default=None, alias="sequenceNumber")
     consumer_id: Optional[str] = Field(default=None, alias="consumerId")
+    updated_at_utc: Optional[datetime] = Field(default=None, alias="updatedAtUtc")
+    custom_state: Optional[str] = Field(default=None, alias="customState")

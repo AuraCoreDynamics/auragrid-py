@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .ipc import AsyncIpcClient, IpcClient
+from .ipc import AsyncIpcClient, IpcClient, IpcError
 from .models import CellMember, CellMembershipMetadata, CellMembersResponse
 
 
@@ -65,7 +65,12 @@ class CellMembership:
         Returns:
             Member info, or ``None`` if not found.
         """
-        response = self._client.get(f"/cell/members/{node_id}")
+        try:
+            response = self._client.get(f"/cell/members/{node_id}")
+        except IpcError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         body = response.json()
         if not body:
             return None
@@ -146,7 +151,12 @@ class AsyncCellMembership:
         Returns:
             Member info, or ``None`` if not found.
         """
-        response = await self._client.get(f"/cell/members/{node_id}")
+        try:
+            response = await self._client.get(f"/cell/members/{node_id}")
+        except IpcError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         body = response.json()
         if not body:
             return None

@@ -3,6 +3,16 @@
 from .cell_config import AsyncCellConfiguration, CellConfiguration
 from .cell_membership import AsyncCellMembership, CellMembership
 from .chaos_client import AsyncChaosClient, ChaosClient
+from .collaboration import (
+    AsyncCollaborationClient,
+    CollaborationClient,
+    ConflictError,
+    ConflictResolutionAction,
+    LeaseConflictDto,
+    LeaseRecordDto,
+    MasPlacementMode,
+    WorkBatchClaimDto,
+)
 from .decorators import auragrid_method, auragrid_service
 from .descriptor import generate_descriptor, save_descriptor
 from .event_client import AsyncEventClient, EventClient
@@ -86,6 +96,15 @@ __all__ = [
     # Lease
     "LeaseClient",
     "AsyncLeaseClient",
+    # Collaboration
+    "CollaborationClient",
+    "AsyncCollaborationClient",
+    "MasPlacementMode",
+    "ConflictResolutionAction",
+    "LeaseRecordDto",
+    "WorkBatchClaimDto",
+    "LeaseConflictDto",
+    "ConflictError",
     # Registry
     "RegistryClient",
     "AsyncRegistryClient",

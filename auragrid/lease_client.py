@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from .ipc import AsyncIpcClient, IpcClient
+from .ipc import AsyncIpcClient, IpcClient, IpcError
 
 logger = logging.getLogger("auragrid.lease_client")
 
@@ -112,7 +112,12 @@ class LeaseClient:
 
     def get_lease_info(self, mas_id: str) -> Optional[LeaseInfo]:
         """Get current lease info for a MAS."""
-        resp = self._ipc.get(f"/cell/lease/{mas_id}")
+        try:
+            resp = self._ipc.get(f"/cell/lease/{mas_id}")
+        except IpcError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -120,7 +125,12 @@ class LeaseClient:
 
     def get_last_marker(self, mas_id: str) -> Optional[WalMarker]:
         """Get the last reported WAL marker for a MAS lease."""
-        resp = self._ipc.get(f"/cell/lease/marker/{mas_id}")
+        try:
+            resp = self._ipc.get(f"/cell/lease/marker/{mas_id}")
+        except IpcError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         resp.raise_for_status()
         marker_data = resp.json().get("marker")
         return WalMarker.from_dict(marker_data) if marker_data else None
@@ -161,7 +171,12 @@ class AsyncLeaseClient:
 
     async def get_lease_info(self, mas_id: str) -> Optional[LeaseInfo]:
         """Get current lease info for a MAS."""
-        resp = await self._ipc.get(f"/cell/lease/{mas_id}")
+        try:
+            resp = await self._ipc.get(f"/cell/lease/{mas_id}")
+        except IpcError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -169,7 +184,12 @@ class AsyncLeaseClient:
 
     async def get_last_marker(self, mas_id: str) -> Optional[WalMarker]:
         """Get the last reported WAL marker for a MAS lease."""
-        resp = await self._ipc.get(f"/cell/lease/marker/{mas_id}")
+        try:
+            resp = await self._ipc.get(f"/cell/lease/marker/{mas_id}")
+        except IpcError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         resp.raise_for_status()
         marker_data = resp.json().get("marker")
         return WalMarker.from_dict(marker_data) if marker_data else None
