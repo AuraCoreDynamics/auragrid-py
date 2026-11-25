@@ -88,3 +88,41 @@ class WalMarkerDto(BaseModel):
     consumer_id: Optional[str] = Field(default=None, alias="consumerId")
     updated_at_utc: Optional[datetime] = Field(default=None, alias="updatedAtUtc")
     custom_state: Optional[str] = Field(default=None, alias="customState")
+
+
+from .ops_telemetry import (  # noqa: E402
+    OPS_CRASH_REPORT_TOPIC,
+    OPS_LOG_ERROR_TOPIC,
+    OPS_PERF_ANOMALY_TOPIC,
+    OPS_SECURITY_AUDIT_TOPIC,
+    OpsCrashReportDto,
+    OpsLogErrorDto,
+    OpsPerfAnomalyDto,
+    OpsProvenanceDto,
+    OpsTelemetryPayload,
+    StackFrameDto,
+    compute_ops_fingerprint,
+    decode_ops_event,
+    encode_ops_payload,
+)
+
+__all__ = [
+    "AuraEventDto",
+    "PublishRequest",
+    "ConsumeResponse",
+    "WalMarkerDto",
+    "OPS_LOG_ERROR_TOPIC",
+    "OPS_CRASH_REPORT_TOPIC",
+    "OPS_PERF_ANOMALY_TOPIC",
+    "OPS_SECURITY_AUDIT_TOPIC",
+    "StackFrameDto",
+    "OpsProvenanceDto",
+    "OpsLogErrorDto",
+    "OpsCrashReportDto",
+    "OpsPerfAnomalyDto",
+    "OpsTelemetryPayload",
+    "compute_ops_fingerprint",
+    "encode_ops_payload",
+    "decode_ops_event",
+]
+

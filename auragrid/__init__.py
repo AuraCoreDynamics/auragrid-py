@@ -17,6 +17,21 @@ from .decorators import auragrid_method, auragrid_service
 from .descriptor import generate_descriptor, save_descriptor
 from .event_client import AsyncEventClient, EventClient
 from .event_models import AuraEventDto, ConsumeResponse, PublishRequest, WalMarkerDto
+from .ops_telemetry import (
+    OPS_CRASH_REPORT_TOPIC,
+    OPS_LOG_ERROR_TOPIC,
+    OPS_PERF_ANOMALY_TOPIC,
+    OPS_SECURITY_AUDIT_TOPIC,
+    OpsCrashReportDto,
+    OpsLogErrorDto,
+    OpsPerfAnomalyDto,
+    OpsProvenanceDto,
+    OpsTelemetryPayload,
+    StackFrameDto,
+    compute_ops_fingerprint,
+    decode_ops_event,
+    encode_ops_payload,
+)
 from .emulation import AsyncEmulatedIpcClient, EmulatedIpcClient
 from .cli import build_agp_package, load_env_file, resolve_env_vars
 from .governance import AsyncGovernanceClient, GovernanceClient
@@ -84,6 +99,20 @@ __all__ = [
     "PublishRequest",
     "ConsumeResponse",
     "WalMarkerDto",
+    # DevSecOps Telemetry
+    "OPS_LOG_ERROR_TOPIC",
+    "OPS_CRASH_REPORT_TOPIC",
+    "OPS_PERF_ANOMALY_TOPIC",
+    "OPS_SECURITY_AUDIT_TOPIC",
+    "StackFrameDto",
+    "OpsProvenanceDto",
+    "OpsLogErrorDto",
+    "OpsCrashReportDto",
+    "OpsPerfAnomalyDto",
+    "OpsTelemetryPayload",
+    "compute_ops_fingerprint",
+    "encode_ops_payload",
+    "decode_ops_event",
     # Grid context
     "GridContext",
     "AsyncGridContext",

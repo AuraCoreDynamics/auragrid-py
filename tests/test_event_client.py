@@ -9,7 +9,21 @@ import httpx
 import pytest
 
 from auragrid.event_client import AsyncEventClient, EventClient
-from auragrid.event_models import AuraEventDto, ConsumeResponse, PublishRequest, WalMarkerDto
+from auragrid.event_models import (
+    OPS_CRASH_REPORT_TOPIC,
+    OPS_LOG_ERROR_TOPIC,
+    OPS_PERF_ANOMALY_TOPIC,
+    AuraEventDto,
+    ConsumeResponse,
+    OpsCrashReportDto,
+    OpsLogErrorDto,
+    OpsPerfAnomalyDto,
+    OpsProvenanceDto,
+    PublishRequest,
+    StackFrameDto,
+    WalMarkerDto,
+    compute_ops_fingerprint,
+)
 from auragrid.ipc import AsyncIpcClient, IpcClient, IpcError, IpcOptions
 
 from .conftest import make_json_response
@@ -694,3 +708,178 @@ class TestSyncSubscribeBackoff:
         assert len(marker_updates) >= 1
         assert marker_updates[0]["sequenceNumber"] == 5
         ipc.close()
+
+
+# ─── DevSecOps Telemetry Pub/Sub Round-Trip Tests ────────────────────────────
+
+
+def _sample_ops_payloads() -> tuple[OpsLogErrorDto, OpsCrashReportDto, OpsPerfAnomalyDto]:
+    sprout_prov = OpsProvenanceDto(
+        app_id="aurarouter",
+        mas_id="router-service",
+        version="1.4.0",
+        commit_sha="deadbeef1234",
+        mvenv_digest="sha256:abcdef0123456789",
+        node_id="sprout-dev-01",
+        runtime_tier="aurasprout",
+    )
+    grid_prov = OpsProvenanceDto(
+        app_id="auraxlm",
+        mas_id="moe-worker",
+        version="2.1.0",
+        node_id="grid-cell-02",
+        runtime_tier="auragrid",
+    )
+    log_err = OpsLogErrorDto(
+        timestamp="2026-11-24T19:10:00Z",
+        provenance=sprout_prov,
+        logger="aurarouter.dispatch",
+        level="ERROR",
+        message="Backend model timeout",
+        exception_type="TimeoutError",
+        frames=[StackFrameDto(file="aurarouter/dispatch.py", line=112, function="route")],
+        log_tail=["2026-11-24T19:10:00Z ERROR Backend model timeout"],
+        fingerprint=compute_ops_fingerprint(OPS_LOG_ERROR_TOPIC, "aurarouter", "TimeoutError", "112"),
+    )
+    crash_rep = OpsCrashReportDto(
+        timestamp="2026-11-24T19:11:00Z",
+        provenance=grid_prov,
+        exit_code=139,
+        signal="SIGSEGV",
+        restart_count=1,
+        uptime_seconds=95.4,
+        stderr_tail=["Segmentation fault (core dumped)"],
+        fingerprint=compute_ops_fingerprint(OPS_CRASH_REPORT_TOPIC, "auraxlm", "139", "SIGSEGV"),
+    )
+    perf_anom = OpsPerfAnomalyDto(
+        timestamp="2026-11-24T19:12:00Z",
+        provenance=sprout_prov,
+        metric="latency_ms",
+        observed_value=612.25,
+        slo_threshold=250.0,
+        operation="POST /v1/route",
+        fingerprint=compute_ops_fingerprint(OPS_PERF_ANOMALY_TOPIC, "aurarouter", "latency_ms", "POST /v1/route"),
+    )
+    return log_err, crash_rep, perf_anom
+
+
+class TestOpsTelemetryEventClient:
+    """Round-trip tests for publish_ops_telemetry and consume_ops_telemetry (sync & async)."""
+
+    def test_sync_publish_and_consume_ops_telemetry_roundtrip(self, ipc_options: IpcOptions) -> None:
+        wal_by_topic: dict[str, list[dict]] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            topic_id = path.split("/cell/events/", 1)[1]
+            if request.method == "POST":
+                body = json.loads(request.content)
+                bucket = wal_by_topic.setdefault(topic_id, [])
+                seq = len(bucket) + 1
+                envelope = {
+                    "eventId": f"evt-{topic_id}-{seq}",
+                    "topicId": topic_id,
+                    "sequenceNumber": seq,
+                    "timestamp": "2026-11-24T19:15:00Z",
+                    "sourceNodeId": "sprout-dev-01",
+                    "eventType": body.get("eventType"),
+                    "payload": body["payload"],
+                }
+                bucket.append(envelope)
+                return make_json_response(envelope)
+            if request.method == "GET":
+                after = int(request.url.params.get("after", "0"))
+                count = int(request.url.params.get("count", "100"))
+                events = [e for e in wal_by_topic.get(topic_id, []) if e["sequenceNumber"] > after][:count]
+                return make_json_response({"events": events})
+            return make_json_response({"error": "unexpected"}, status_code=404)
+
+        ipc_options.max_retries = 0
+        ipc, events = _make_sync_client(handler, ipc_options)
+        log_err, crash_rep, perf_anom = _sample_ops_payloads()
+
+        evt1 = events.publish_ops_telemetry(log_err)
+        evt2 = events.publish_ops_telemetry(crash_rep)
+        evt3 = events.publish_ops_telemetry(perf_anom)
+
+        assert evt1.topic_id == OPS_LOG_ERROR_TOPIC
+        assert evt1.event_type == OPS_LOG_ERROR_TOPIC
+        assert evt2.topic_id == OPS_CRASH_REPORT_TOPIC
+        assert evt2.event_type == OPS_CRASH_REPORT_TOPIC
+        assert evt3.topic_id == OPS_PERF_ANOMALY_TOPIC
+        assert evt3.event_type == OPS_PERF_ANOMALY_TOPIC
+
+        consumed_logs = events.consume_ops_telemetry(OPS_LOG_ERROR_TOPIC, after=0, count=10)
+        assert len(consumed_logs) == 1
+        assert consumed_logs[0][0].event_id == evt1.event_id
+        assert isinstance(consumed_logs[0][1], OpsLogErrorDto)
+        assert consumed_logs[0][1] == log_err
+
+        consumed_crashes = events.consume_ops_telemetry(OPS_CRASH_REPORT_TOPIC)
+        assert len(consumed_crashes) == 1
+        assert isinstance(consumed_crashes[0][1], OpsCrashReportDto)
+        assert consumed_crashes[0][1] == crash_rep
+
+        consumed_perf = events.consume_ops_telemetry(OPS_PERF_ANOMALY_TOPIC)
+        assert len(consumed_perf) == 1
+        assert isinstance(consumed_perf[0][1], OpsPerfAnomalyDto)
+        assert consumed_perf[0][1] == perf_anom
+
+        assert events.consume_ops_telemetry(OPS_LOG_ERROR_TOPIC, after=1, count=10) == []
+        ipc.close()
+
+    @pytest.mark.asyncio
+    async def test_async_publish_and_consume_ops_telemetry_roundtrip(self, ipc_options: IpcOptions) -> None:
+        wal_by_topic: dict[str, list[dict]] = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            topic_id = path.split("/cell/events/", 1)[1]
+            if request.method == "POST":
+                body = json.loads(request.content)
+                bucket = wal_by_topic.setdefault(topic_id, [])
+                seq = len(bucket) + 1
+                envelope = {
+                    "eventId": f"evt-{topic_id}-{seq}",
+                    "topicId": topic_id,
+                    "sequenceNumber": seq,
+                    "timestamp": "2026-11-24T19:15:00Z",
+                    "sourceNodeId": "grid-cell-02",
+                    "eventType": body.get("eventType"),
+                    "payload": body["payload"],
+                }
+                bucket.append(envelope)
+                return make_json_response(envelope)
+            if request.method == "GET":
+                after = int(request.url.params.get("after", "0"))
+                count = int(request.url.params.get("count", "100"))
+                events = [e for e in wal_by_topic.get(topic_id, []) if e["sequenceNumber"] > after][:count]
+                return make_json_response({"events": events})
+            return make_json_response({"error": "unexpected"}, status_code=404)
+
+        ipc_options.max_retries = 0
+        ipc, events = _make_async_client(handler, ipc_options)
+        log_err, crash_rep, perf_anom = _sample_ops_payloads()
+
+        evt1 = await events.publish_ops_telemetry(log_err)
+        evt2 = await events.publish_ops_telemetry(crash_rep)
+        evt3 = await events.publish_ops_telemetry(perf_anom)
+
+        assert evt1.event_type == OPS_LOG_ERROR_TOPIC
+        assert evt2.event_type == OPS_CRASH_REPORT_TOPIC
+        assert evt3.event_type == OPS_PERF_ANOMALY_TOPIC
+
+        consumed_logs = await events.consume_ops_telemetry(OPS_LOG_ERROR_TOPIC, after=0, count=5)
+        assert len(consumed_logs) == 1
+        assert consumed_logs[0][1] == log_err
+
+        consumed_crashes = await events.consume_ops_telemetry(OPS_CRASH_REPORT_TOPIC)
+        assert len(consumed_crashes) == 1
+        assert consumed_crashes[0][1] == crash_rep
+
+        consumed_perf = await events.consume_ops_telemetry(OPS_PERF_ANOMALY_TOPIC)
+        assert len(consumed_perf) == 1
+        assert consumed_perf[0][1] == perf_anom
+
+        await ipc.close()
+

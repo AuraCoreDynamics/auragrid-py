@@ -18,6 +18,7 @@ from typing import AsyncIterator, Iterator, Optional
 
 from .event_models import AuraEventDto, ConsumeResponse, PublishRequest, WalMarkerDto
 from .ipc import AsyncIpcClient, IpcClient
+from .ops_telemetry import OpsTelemetryPayload, decode_ops_event, encode_ops_payload
 
 
 def _default_consumer_id() -> str:
@@ -87,6 +88,45 @@ class EventClient:
         )
         result = ConsumeResponse.model_validate(response.json())
         return result.events
+
+    # ─── DevSecOps Telemetry ──────────────────────────────────────────────
+
+    def publish_ops_telemetry(
+        self,
+        telemetry: OpsTelemetryPayload,
+    ) -> AuraEventDto:
+        """Publish a typed DevSecOps telemetry payload to its canonical WAL topic.
+
+        Args:
+            telemetry: Validated ``OpsLogErrorDto``, ``OpsCrashReportDto``, or ``OpsPerfAnomalyDto``.
+
+        Returns:
+            The persisted ``AuraEventDto`` envelope returned by the cell host.
+        """
+        return self.publish(
+            telemetry.topic,
+            encode_ops_payload(telemetry),
+            event_type=telemetry.topic,
+        )
+
+    def consume_ops_telemetry(
+        self,
+        topic_id: str,
+        after: int = 0,
+        count: int = 100,
+    ) -> list[tuple[AuraEventDto, OpsTelemetryPayload]]:
+        """Consume WAL events from an ops telemetry topic and decode each payload.
+
+        Args:
+            topic_id: Target ops telemetry topic (e.g. ``OPS_LOG_ERROR_TOPIC``).
+            after: Sequence number cursor to read after (0 = beginning).
+            count: Maximum number of events to retrieve.
+
+        Returns:
+            Ordered list of ``(event, decoded_telemetry_dto)`` pairs.
+        """
+        events = self.consume(topic_id, after=after, count=count)
+        return [(event, decode_ops_event(event)) for event in events]
 
     # ─── Topic Management ─────────────────────────────────────────────────
 
@@ -272,6 +312,45 @@ class AsyncEventClient:
         )
         result = ConsumeResponse.model_validate(response.json())
         return result.events
+
+    # ─── DevSecOps Telemetry ──────────────────────────────────────────────
+
+    async def publish_ops_telemetry(
+        self,
+        telemetry: OpsTelemetryPayload,
+    ) -> AuraEventDto:
+        """Publish a typed DevSecOps telemetry payload to its canonical WAL topic.
+
+        Args:
+            telemetry: Validated ``OpsLogErrorDto``, ``OpsCrashReportDto``, or ``OpsPerfAnomalyDto``.
+
+        Returns:
+            The persisted ``AuraEventDto`` envelope returned by the cell host.
+        """
+        return await self.publish(
+            telemetry.topic,
+            encode_ops_payload(telemetry),
+            event_type=telemetry.topic,
+        )
+
+    async def consume_ops_telemetry(
+        self,
+        topic_id: str,
+        after: int = 0,
+        count: int = 100,
+    ) -> list[tuple[AuraEventDto, OpsTelemetryPayload]]:
+        """Consume WAL events from an ops telemetry topic and decode each payload.
+
+        Args:
+            topic_id: Target ops telemetry topic (e.g. ``OPS_LOG_ERROR_TOPIC``).
+            after: Sequence number cursor to read after (0 = beginning).
+            count: Maximum number of events to retrieve.
+
+        Returns:
+            Ordered list of ``(event, decoded_telemetry_dto)`` pairs.
+        """
+        events = await self.consume(topic_id, after=after, count=count)
+        return [(event, decode_ops_event(event)) for event in events]
 
     # ─── Topic Management ─────────────────────────────────────────────────
 
